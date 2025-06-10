@@ -3,7 +3,14 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertCustomerSchema, insertInteractionSchema } from "@shared/schema";
 import { z } from "zod";
-import { loginShopware, getCurrentUser, getCustomersForUser } from "./shopware";
+import {
+  loginShopware,
+  getCurrentUser,
+  getCustomersForUser,
+  getAuthorizeUrl,
+  exchangeAuthorizationCode,
+} from "./shopware";
+import crypto from "crypto";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Authentication routes
@@ -117,13 +124,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // OAuth2 preparation route (dummy implementation for future Shopware integration)
-  app.post("/api/auth/oauth", async (req, res) => {
-    // This is a placeholder for future OAuth2 implementation with Shopware
-    res.json({ 
-      message: "OAuth2 endpoint prepared for Shopware integration",
-      status: "not_implemented"
-    });
+  // OAuth2 login with Shopware
+  app.get("/api/auth/oauth", (req, res) => {
+    const state = crypto.randomBytes(16).toString("hex");
+    (req.session as any).oauthState = state;
+    const redirectUri = `${req.protocol}://${req.get("host")}/api/auth/oauth/callback`;
+    const url = getAuthorizeUrl(redirectUri, state);
+    res.redirect(url);
+  });
+
+  app.get("/api/auth/oauth/callback", async (req, res) => {
+    const { code, state } = req.query as { code?: string; state?: string };
+    if (!code || !state || state !== (req.session as any).oauthState) {
+      return res.status(400).json({ message: "Invalid OAuth state or code" });
+    }
+
+    const redirectUri = `${req.protocol}://${req.get("host")}/api/auth/oauth/callback`;
+
+    try {
+      const token = await exchangeAuthorizationCode(code, redirectUri);
+      const user = await getCurrentUser(token.access_token);
+      (req.session as any).token = token.access_token;
+      (req.session as any).user = user;
+      res.redirect("/map");
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
   });
 
   const httpServer = createServer(app);
