@@ -1,10 +1,22 @@
 import express, { type Request, Response, NextFunction } from "express";
+import session from "express-session";
+import memorystore from "memorystore";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+
+const MemoryStore = memorystore(session);
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+app.use(
+  session({
+    store: new MemoryStore({ checkPeriod: 86400000 }),
+    secret: process.env.SESSION_SECRET || "changeme",
+    resave: false,
+    saveUninitialized: false,
+  }),
+);
 
 app.use((req, res, next) => {
   const start = Date.now();
