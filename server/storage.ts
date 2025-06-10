@@ -138,7 +138,17 @@ export class MemStorage implements IStorage {
     const customer: Customer = {
       ...insertCustomer,
       id,
-      createdAt: new Date()
+      createdAt: new Date(),
+      address: insertCustomer.address || null,
+      phone: insertCustomer.phone || null,
+      lat: insertCustomer.lat || null,
+      lng: insertCustomer.lng || null,
+      status: (insertCustomer.status || "active") as string,
+      totalRevenue: insertCustomer.totalRevenue || null,
+      orderCount: insertCustomer.orderCount || null,
+      lastContact: insertCustomer.lastContact || null,
+      memberSince: insertCustomer.memberSince || null,
+      discountLevel: insertCustomer.discountLevel || null
     };
     this.customers.set(id, customer);
     return customer;
@@ -170,7 +180,11 @@ export class MemStorage implements IStorage {
     const interaction: Interaction = {
       ...insertInteraction,
       id,
-      createdAt: new Date()
+      createdAt: new Date(),
+      status: (insertInteraction.status || "completed") as string,
+      description: insertInteraction.description || null,
+      duration: insertInteraction.duration || null,
+      attachments: insertInteraction.attachments || null
     };
     this.interactions.set(id, interaction);
     return interaction;
