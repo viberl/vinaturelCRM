@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 
+// Load environment variables
+const shopwareUrl = process.env.SHOPWARE_URL || 'https://vinaturel.de';
+
 export default defineConfig({
   plugins: [
     react(),
@@ -28,10 +31,29 @@ export default defineConfig({
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
   },
+  // Make environment variables available to the client
+  define: {
+    'process.env.VITE_SHOPWARE_URL': JSON.stringify(shopwareUrl),
+  },
+  
   server: {
+    host: '0.0.0.0',
+    port: 3001,
+    strictPort: true,
+    hmr: {
+      protocol: 'ws',
+      host: 'localhost',
+    },
     fs: {
-      strict: true,
-      deny: ["**/.*"],
+      strict: false,
+      allow: ['..'],
+    },
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+        secure: false,
+      },
     },
   },
 });
