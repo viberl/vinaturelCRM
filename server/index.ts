@@ -19,6 +19,8 @@ const corsOptions = {
     const allowedOrigins = [
       'http://localhost:3001',  // Vite dev server
       'http://localhost:3000',  // Express server
+      'http://127.0.0.1:3001',  // Alternative localhost
+      'http://127.0.0.1:3000',  // Alternative localhost
       process.env.CLIENT_URL,
       process.env.SHOPWARE_URL || 'https://vinaturel.de'
     ].filter(Boolean) as string[];
@@ -35,11 +37,12 @@ const corsOptions = {
     const isAllowed = allowedOrigins.some(
       allowed => origin === allowed || 
                origin.startsWith(allowed) ||
-               origin.includes('localhost:3001')
+               origin.includes('localhost:') ||
+               origin.includes('127.0.0.1')
     );
     
     if (isAllowed) {
-      console.log('Origin allowed by CORS');
+      console.log('Origin allowed by CORS:', origin);
       callback(null, true);
     } else {
       console.warn('CORS blocked for origin:', origin);
@@ -48,20 +51,71 @@ const corsOptions = {
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with', 'sw-context-token'],
-  exposedHeaders: ['Content-Range', 'X-Total-Count'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'X-Requested-With',
+    'X-Auth-Token',
+    'sw-context-token',
+    'sw-access-key'
+  ],
+  exposedHeaders: [
+    'Content-Range', 
+    'X-Total-Count',
+    'sw-context-token',
+    'sw-access-key'
+  ],
   maxAge: 86400 // 24 hours
 };
 
-// Apply CORS middleware
-app.use(cors(corsOptions));
+// Apply CORS middleware with custom headers
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '';
+  
+  // Check if origin is allowed
+  const allowedOrigins = [
+    'http://localhost:3001',
+    'http://localhost:3000',
+    'http://127.0.0.1:3001',
+    'http://127.0.0.1:3000',
+    process.env.CLIENT_URL,
+    process.env.SHOPWARE_URL || 'https://vinaturel.de'
+  ].filter(Boolean) as string[];
+  
+  if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, sw-context-token, sw-access-key');
+    res.header('Access-Control-Expose-Headers', 'Content-Range, X-Total-Count, sw-context-token, sw-access-key');
+  }
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  next();
+});
 
-// Handle preflight requests
-app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Request logger
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`, {
+    headers: req.headers,
+    body: req.body,
+    query: req.query,
+    params: req.params
+  });
+  next();
+});
 
 // Session configuration
 app.use(session({
@@ -191,7 +245,9 @@ app.use((req, res, next) => {
   // ALWAYS serve the app on port 3000
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
-  const port = parseInt(process.env.PORT || '3000', 10);
+  const port = 3000; // Force port 3000 for backend
+  
+  console.log(`Starting server on port ${port}...`);
   
   // Listen only on IPv4 to avoid issues with IPv6
   server.listen(port, '0.0.0.0', () => {

@@ -87,6 +87,20 @@ export const adminAuth = (req: AuthRequest, res: Response, next: NextFunction) =
 };
 
 /**
+ * Create an Express router for authentication routes
+ */
+export function createAuthRouter() {
+  const router = require('express').Router();
+  
+  // Add authentication routes here if needed
+  // Example:
+  // router.post('/login', loginHandler);
+  // router.post('/refresh-token', refreshTokenHandler);
+  
+  return router;
+}
+
+/**
  * Generate a JWT token for the user
  */
 export const generateToken = (userData: {

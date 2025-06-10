@@ -33,8 +33,12 @@ export default defineConfig({
   },
   // Make environment variables available to the client
   define: {
-    'process.env.VITE_API_URL': JSON.stringify('http://localhost:3000'),
-    'process.env.VITE_SHOPWARE_URL': JSON.stringify(shopwareUrl),
+    'process.env': {
+      ...process.env,
+      VITE_API_URL: JSON.stringify(process.env.VITE_API_URL || 'http://localhost:3000/api'),
+      VITE_SHOPWARE_URL: JSON.stringify(shopwareUrl),
+      VITE_DEV: JSON.stringify(process.env.NODE_ENV !== 'production')
+    }
   },
   
   server: {
