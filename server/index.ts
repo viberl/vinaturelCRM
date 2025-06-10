@@ -17,30 +17,39 @@ const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     // Define allowed origins
     const allowedOrigins = [
-      process.env.CLIENT_URL || 'http://localhost:5173',
+      'http://localhost:3001',  // Vite dev server
+      'http://localhost:3000',  // Express server
+      process.env.CLIENT_URL,
       process.env.SHOPWARE_URL || 'https://vinaturel.de'
     ].filter(Boolean) as string[];
     
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) {
+      console.log('No origin, allowing request');
       return callback(null, true);
     }
     
+    console.log('Checking CORS for origin:', origin);
+    
     // Check if the origin is allowed
     const isAllowed = allowedOrigins.some(
-      allowed => origin === allowed || origin.startsWith(allowed)
+      allowed => origin === allowed || 
+               origin.startsWith(allowed) ||
+               origin.includes('localhost:3001')
     );
     
     if (isAllowed) {
+      console.log('Origin allowed by CORS');
       callback(null, true);
     } else {
       console.warn('CORS blocked for origin:', origin);
-      callback(new Error('Not allowed by CORS'));
+      console.warn('Allowed origins:', allowedOrigins);
+      callback(new Error(`Not allowed by CORS. Origin: ${origin}`));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with', 'sw-context-token'],
   exposedHeaders: ['Content-Range', 'X-Total-Count'],
   maxAge: 86400 // 24 hours
 };

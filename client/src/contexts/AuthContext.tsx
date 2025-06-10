@@ -1,17 +1,20 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import axios from 'axios';
+import api from '@/lib/api';
 
-interface User {
+export interface User {
   id: string;
   email: string;
-  name: string;
-  // Add other user fields as needed from Shopware 6
+  firstName: string;
+  lastName: string;
+  customerNumber: string;
+  role: string;
+  contextToken?: string;
 }
 
 interface AuthContextType {
   user: User | null;
-  login: () => Promise<void>;
-  logout: () => void;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
   loading: boolean;
   error: string | null;
 }
@@ -24,88 +27,92 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Check for token in URL after redirect
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token');
-    const error = params.get('error');
-    
-    if (token) {
-      // We have a token from the redirect
-      localStorage.setItem('authToken', token);
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    const checkAuth = async () => {
+      const token = localStorage.getItem('authToken');
       
-      // Get user info using the token
-      const fetchUser = async () => {
+      if (token) {
         try {
-          const response = await axios.get(`${process.env.REACT_APP_API_URL}/api/user`);
-          setUser(response.data);
-          // Clean up URL
-          window.history.replaceState({}, document.title, window.location.pathname);
+          // Get current user data
+          const response = await api.get('/auth/me');
+          
+          if (response.data.success && response.data.user) {
+            setUser({
+              id: response.data.user.id,
+              email: response.data.user.email,
+              firstName: response.data.user.firstName,
+              lastName: response.data.user.lastName,
+              customerNumber: response.data.user.customerNumber,
+              role: response.data.user.role,
+              contextToken: response.data.user.contextToken
+            });
+          } else {
+            throw new Error('Ungültige Benutzerdaten erhalten');
+          }
         } catch (err) {
-          console.error('Failed to fetch user:', err);
-          setError('Fehler beim Laden der Benutzerdaten');
-          logout();
+          console.error('Auth check failed:', err);
+          // Clear invalid token
+          localStorage.removeItem('authToken');
+          setError('Fehler bei der Authentifizierung. Bitte melden Sie sich erneut an.');
         } finally {
           setLoading(false);
         }
-      };
-      
-      fetchUser();
-      return;
-    }
-
-    const checkAuth = async () => {
-      try {
-        if (error) {
-          // Handle error from redirect
-          console.error('Login error:', error);
-          setError('Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut.');
-        } else {
-          // Check if we have a stored token
-          const storedToken = localStorage.getItem('authToken');
-          if (storedToken) {
-            axios.defaults.headers.common['Authorization'] = `Bearer ${storedToken}`;
-            try {
-              const response = await axios.get('/api/auth/me');
-              setUser(response.data);
-            } catch (err) {
-              // Token might be expired, clear it
-              localStorage.removeItem('authToken');
-              delete axios.defaults.headers.common['Authorization'];
-            }
-          }
-        }
-      } catch (err) {
-        console.error('Auth check failed:', err);
-        setError('Fehler bei der Authentifizierung. Bitte versuchen Sie es erneut.');
-        localStorage.removeItem('authToken');
-        delete axios.defaults.headers.common['Authorization'];
-      } finally {
+      } else {
         setLoading(false);
       }
     };
-
+    
     checkAuth();
   }, []);
 
-  const login = async () => {
+  const login = async (email: string, password: string) => {
     setLoading(true);
     setError(null);
     try {
-      // Redirect to our login endpoint which will handle the Shopware flow
-      window.location.href = '/api/auth/login';
+      const response = await api.post('/auth/login', { email, password });
+      
+      if (response.data.success && response.data.token) {
+        // Store the token
+        localStorage.setItem('authToken', response.data.token);
+        
+        // Set user data
+        setUser({
+          id: response.data.user.id,
+          email: response.data.user.email,
+          firstName: response.data.user.firstName,
+          lastName: response.data.user.lastName,
+          customerNumber: response.data.user.customerNumber,
+          role: response.data.user.role,
+          contextToken: response.data.user.contextToken
+        });
+      } else {
+        throw new Error('Ungültige Antwort vom Server');
+      }
     } catch (err: any) {
       console.error('Login error:', err);
-      setError(err.response?.data?.message || 'Login fehlgeschlagen. Bitte versuchen Sie es später erneut.');
+      const errorMessage = err.response?.data?.message || 
+                         err.message || 
+                         'Anmeldung fehlgeschlagen. Bitte versuchen Sie es später erneut.';
+      setError(errorMessage);
+      throw new Error(errorMessage);
+    } finally {
       setLoading(false);
-      throw err;
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem('authToken');
-    delete axios.defaults.headers.common['Authorization'];
-    setUser(null);
+  const logout = async () => {
+    try {
+      // Call logout API if user is logged in
+      if (user?.contextToken) {
+        await api.post('/auth/logout');
+      }
+    } catch (err) {
+      console.error('Logout error:', err);
+      // Continue with local logout even if API call fails
+    } finally {
+      // Clear local auth state
+      localStorage.removeItem('authToken');
+      setUser(null);
+    }
   };
 
   return (
