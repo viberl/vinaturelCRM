@@ -215,7 +215,7 @@ export default function CustomerDetail() {
                                 {interaction.status === 'completed' ? 'Abgeschlossen' : 
                                  interaction.status === 'planned' ? 'Geplant' : 'Abgebrochen'}
                               </Badge>
-                              {interaction.attachments > 0 && (
+                              {interaction.attachments && interaction.attachments > 0 && (
                                 <span>Anhänge: {interaction.attachments}</span>
                               )}
                             </div>

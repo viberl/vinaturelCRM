@@ -3,12 +3,55 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertCustomerSchema, insertInteractionSchema } from "@shared/schema";
 import { z } from "zod";
+import { loginShopware, getCurrentUser, getCustomersForUser } from "./shopware";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Authentication routes
+  app.post("/api/login", async (req, res) => {
+    const { username, password } = req.body as {
+      username?: string;
+      password?: string;
+    };
+
+    if (!username || !password) {
+      return res.status(400).json({ message: "Missing credentials" });
+    }
+
+    try {
+      const token = await loginShopware(username, password);
+      const user = await getCurrentUser(token.access_token);
+      (req.session as any).token = token.access_token;
+      (req.session as any).user = user;
+      res.json(user);
+    } catch (err) {
+      res.status(401).json({ message: "Invalid username or password" });
+    }
+  });
+
+  app.post("/api/logout", (req, res) => {
+    req.session.destroy(() => {
+      res.json({ ok: true });
+    });
+  });
+
+  app.get("/api/me", (req, res) => {
+    if ((req.session as any).user) {
+      res.json((req.session as any).user);
+    } else {
+      res.status(401).json({ message: "Unauthorized" });
+    }
+  });
+
   // Customer routes
   app.get("/api/customers", async (req, res) => {
+    if (!(req.session as any).user || !(req.session as any).token) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
     try {
-      const customers = await storage.getCustomers();
+      const customers = await getCustomersForUser(
+        (req.session as any).token,
+        (req.session as any).user.id,
+      );
       res.json(customers);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch customers" });
