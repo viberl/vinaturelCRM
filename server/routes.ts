@@ -74,6 +74,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Shopware integration routes
+  app.post("/api/shopware/sync", async (req, res) => {
+    try {
+      const result = await storage.syncCustomersFromShopware();
+      res.json({
+        message: "Shopware sync completed",
+        ...result
+      });
+    } catch (error) {
+      console.error("Shopware sync error:", error);
+      res.status(500).json({ 
+        message: "Failed to sync customers from Shopware",
+        error: error instanceof Error ? error.message : "Unknown error"
+      });
+    }
+  });
+
   // OAuth2 preparation route (dummy implementation for future Shopware integration)
   app.post("/api/auth/oauth", async (req, res) => {
     // This is a placeholder for future OAuth2 implementation with Shopware

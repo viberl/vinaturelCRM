@@ -6,7 +6,7 @@ export interface IStorage {
   getCustomer(id: number): Promise<Customer | undefined>;
   createCustomer(customer: InsertCustomer): Promise<Customer>;
   updateCustomer(id: number, customer: Partial<InsertCustomer>): Promise<Customer | undefined>;
-  
+
   // Interaction methods
   getInteractions(customerId?: number): Promise<Interaction[]>;
   getInteraction(id: number): Promise<Interaction | undefined>;
@@ -18,13 +18,14 @@ export class MemStorage implements IStorage {
   private interactions: Map<number, Interaction>;
   private customerIdCounter: number;
   private interactionIdCounter: number;
+  private shopwareClient: any;
 
   constructor() {
     this.customers = new Map();
     this.interactions = new Map();
     this.customerIdCounter = 1;
     this.interactionIdCounter = 1;
-    
+
     // Initialize with sample data
     this.initializeSampleData();
   }
@@ -188,6 +189,48 @@ export class MemStorage implements IStorage {
     };
     this.interactions.set(id, interaction);
     return interaction;
+  }
+
+  async syncCustomersFromShopware(): Promise<{ imported: number; updated: number; errors: number }> {
+    if (!this.shopwareClient) {
+      throw new Error('Shopware client not configured. Please set SHOPWARE_BASE_URL, SHOPWARE_CLIENT_ID, and SHOPWARE_CLIENT_SECRET environment variables.');
+    }
+
+    let imported = 0;
+    let updated = 0;
+    let errors = 0;
+
+    try {
+      const shopwareCustomers = await this.shopwareClient.getCustomers(100, 1);
+
+      for (const shopwareCustomer of shopwareCustomers) {
+        try {
+          const convertedCustomer = this.shopwareClient.convertToAppCustomer(shopwareCustomer);
+
+          // Check if customer already exists by email
+          const existingCustomer = Array.from(this.customers.values())
+            .find(c => c.email === convertedCustomer.email);
+
+          if (existingCustomer) {
+            // Update existing customer
+            await this.updateCustomer(existingCustomer.id, convertedCustomer);
+            updated++;
+          } else {
+            // Create new customer
+            await this.createCustomer(convertedCustomer);
+            imported++;
+          }
+        } catch (error) {
+          console.error(`Error processing customer ${shopwareCustomer.email}:`, error);
+          errors++;
+        }
+      }
+    } catch (error) {
+      console.error('Error syncing customers from Shopware:', error);
+      throw error;
+    }
+
+    return { imported, updated, errors };
   }
 }
 

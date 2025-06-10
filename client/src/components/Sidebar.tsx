@@ -1,10 +1,19 @@
-import { Link, useLocation } from "wouter";
-import { Wine, Map, Users, BarChart3, CheckSquare, Settings } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { 
+  MapPin, 
+  Users, 
+  Settings, 
+  BarChart3,
+  Bell,
+  Search
+} from "lucide-react";
+import { Link, useLocation } from "wouter";
+import ShopwareSync from "./ShopwareSync";
 
 const navigation = [
-  { name: "Kunden-Karte", href: "/map", icon: Map },
+  { name: "Kunden-Karte", href: "/map", icon: MapPin },
   { name: "Kundenliste", href: "/customers", icon: Users },
   { name: "Analytics", href: "/analytics", icon: BarChart3 },
   { name: "Aufgaben", href: "/tasks", icon: CheckSquare },
@@ -34,7 +43,7 @@ export default function Sidebar() {
         {navigation.map((item) => {
           const Icon = item.icon;
           const isActive = location === item.href || (item.href === "/map" && location === "/");
-          
+
           return (
             <Link key={item.name} href={item.href}>
               <Button
@@ -51,22 +60,13 @@ export default function Sidebar() {
           );
         })}
       </nav>
-
-      {/* User Profile */}
-      <div className="p-4 border-t border-gray-200">
-        <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-gray-300 rounded-full flex items-center justify-center">
-            <span className="text-gray-600 text-sm">MM</span>
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-gray-900">Max Mustermann</p>
-            <p className="text-xs text-gray-500">Sales Manager</p>
-          </div>
-          <Button variant="ghost" size="sm">
-            <Settings className="h-4 w-4" />
-          </Button>
         </div>
-      </div>
+
+        {/* Shopware Integration */}
+        <div className="px-3 py-2 border-t">
+          <ShopwareSync />
+        </div>
+      </ScrollArea>
     </div>
   );
 }
