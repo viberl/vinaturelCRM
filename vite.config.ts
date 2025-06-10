@@ -44,6 +44,7 @@ export default defineConfig({
     hmr: {
       protocol: 'ws',
       host: 'localhost',
+      port: 3001
     },
     fs: {
       strict: false,
@@ -55,7 +56,31 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
         ws: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+        configure: (proxy, _options) => {
+          proxy.on('error', (err, _req, _res) => {
+            console.log('proxy error', err);
+          });
+          proxy.on('proxyReq', (proxyReq, req, _res) => {
+            console.log('Sending Request to the Target:', {
+              method: req.method,
+              path: req.url,
+              headers: req.headers,
+            });
+          });
+          proxy.on('proxyRes', (proxyRes, req, _res) => {
+            console.log('Received Response from the Target:', {
+              statusCode: proxyRes.statusCode,
+              statusMessage: proxyRes.statusMessage,
+              headers: proxyRes.headers,
+            });
+          });
+        }
       }
     },
+    cors: {
+      origin: ['http://localhost:3001', 'http://localhost:3000'],
+      credentials: true
+    }
   },
 });
