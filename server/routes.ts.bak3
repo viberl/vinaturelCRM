@@ -323,8 +323,8 @@ export async function registerRoutes(app: Express): Promise<HttpServer> {
   };
   
   // Register both login routes for backward compatibility
-  app.post('/api/login', handleLogin);
-  app.post('/api/auth/login', handleLogin);
+  //app.post('/api/login', handleLogin);
+    app.post('/store-api/account/login', handleLogin);
 
   // Logout route
   app.post('/api/auth/logout', auth, async (req: AuthRequest, res: Response) => {

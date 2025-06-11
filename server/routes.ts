@@ -381,7 +381,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
   
   // Register both login routes for backward compatibility
   app.post('/api/login', handleLogin);
-  app.post('/api/auth/login', handleLogin);
+  app.post('/store-api/account/login', handleLogin);
 
   // Define interfaces for logout
   interface LogoutResponseData {

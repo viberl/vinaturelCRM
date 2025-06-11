@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Switch, Route, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -13,12 +14,26 @@ import ProtectedRoute from "@/components/auth/ProtectedRoute";
 
 function AppRoutes() {
   const { user } = useAuth();
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
 
-  // If we're on the login page and user is already logged in, redirect to home
-  if (location === '/login' && user) {
-    window.location.href = '/';
-    return null;
+  // Handle redirects based on auth state
+  useEffect(() => {
+    if (user) {
+      // If user is logged in and tries to access login page, redirect to dashboard
+      if (location === '/login' || location === '/') {
+        setLocation('/dashboard');
+      }
+    } else {
+      // If user is not logged in and tries to access protected route, redirect to login
+      if (location !== '/login') {
+        setLocation('/login');
+      }
+    }
+  }, [user, location, setLocation]);
+  
+  // Show loading state while checking auth
+  if (user === undefined) {
+    return <div className="flex items-center justify-center h-screen">Laden...</div>;
   }
 
   return (
@@ -30,9 +45,15 @@ function AppRoutes() {
             <Sidebar />
             <div className="flex-1 flex flex-col overflow-hidden">
               <Switch>
-                <Route path="/" component={MapView} />
+                <Route path="/dashboard" component={MapView} />
                 <Route path="/map" component={MapView} />
                 <Route path="/customer/:id" component={CustomerDetail} />
+                <Route path="/">
+                  {() => {
+                    // This will be caught by the useEffect above
+                    return null;
+                  }}
+                </Route>
                 <Route component={NotFound} />
               </Switch>
             </div>

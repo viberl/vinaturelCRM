@@ -25,11 +25,17 @@ const allowedOrigins = [
   ...(process.env.SHOPWARE_URL ? [process.env.SHOPWARE_URL] : [])
 ].filter(Boolean) as string[];
 
-// CORS Middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
   const origin = req.headers.origin;
   const requestMethod = req.method;
   const requestHeaders = req.headers['access-control-request-headers'];
+  
+  console.log('Incoming request:', {
+    method: req.method,
+    path: req.path,
+    origin,
+    headers: req.headers
+  });
   
   // Erlaube Anfragen mit erlaubter Origin oder ohne Origin (z.B. curl, mobile Apps)
   if (!origin || allowedOrigins.includes(origin)) {
@@ -41,24 +47,60 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     }
     
     // Setze CORS Header
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    const allowedMethods = 'GET, POST, PUT, DELETE, PATCH, OPTIONS';
+    const allowedHeaders = [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'sw-context-token',
+      'access-control-allow-credentials',
+      'access-control-allow-origin',
+      'access-control-allow-headers',
+      'access-control-allow-methods'
+    ];
+    
+    res.setHeader('Access-Control-Allow-Methods', allowedMethods);
+    res.setHeader('Access-Control-Allow-Headers', allowedHeaders.join(', '));
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Max-Age', '86400'); // 24 Stunden
     
     // Behandle Preflight-Anfragen
     if (requestMethod === 'OPTIONS') {
-      // Erlaube die angeforderten Header
+      console.log('CORS: Handling preflight request', {
+        'access-control-request-method': req.headers['access-control-request-method'],
+        'access-control-request-headers': req.headers['access-control-request-headers']
+      });
+      
+      // Setze die angeforderten Header
+      if (req.headers['access-control-request-method']) {
+        res.setHeader('Access-Control-Allow-Methods', req.headers['access-control-request-method']);
+      }
+      
       if (requestHeaders) {
         res.setHeader('Access-Control-Allow-Headers', requestHeaders);
       }
-      console.log('CORS: Handling preflight request');
+      
+      console.log('Sending preflight response with headers:', {
+        'Access-Control-Allow-Origin': origin,
+        'Access-Control-Allow-Methods': res.getHeader('Access-Control-Allow-Methods'),
+        'Access-Control-Allow-Headers': res.getHeader('Access-Control-Allow-Headers'),
+        'Access-Control-Allow-Credentials': 'true'
+      });
+      
       return res.status(200).end();
     }
   } else {
-    console.warn('CORS: Blocked origin:', origin);
+    console.warn('CORS: Blocked origin:', origin, 'Allowed origins:', allowedOrigins);
     return res.status(403).json({ message: 'Not allowed by CORS' });
   }
-  
+
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`, {
+    headers: req.headers,
+    body: req.body,
+    query: req.query,
+    params: req.params
+  });
   next();
 });
 

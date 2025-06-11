@@ -100,7 +100,7 @@ export default defineConfig({
   define: {
     'process.env': {
       ...process.env,
-      VITE_API_URL: JSON.stringify(process.env.VITE_API_URL || 'https://www.vinaturel.de'),
+      VITE_API_URL: JSON.stringify('https://www.vinaturel.de'),
       VITE_SHOPWARE_ACCESS_KEY: JSON.stringify(process.env.VITE_SHOPWARE_ACCESS_KEY || ''),
       VITE_DEV: JSON.stringify(process.env.NODE_ENV !== 'production')
     }

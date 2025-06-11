@@ -44,7 +44,7 @@ export async function registerRoutes(app: Express): Promise<HttpServer> {
   // Parse JSON bodies
   app.use(json());
 
-  // Auth routes - support both /api/login and /api/auth/login for compatibility
+  // Auth routes - support both /api/login and /store-api/account/login for compatibility
   const handleLogin = async (req: Request, res: Response) => {
     console.log('Login request received:', { 
       headers: req.headers,

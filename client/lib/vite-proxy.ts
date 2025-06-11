@@ -37,7 +37,7 @@ export function createProxyConfig(shopwareUrl: string, accessKey: string, apiVer
         proxy.on('proxyRes', (proxyRes: any, req: any, _res: any) => {
           console.log('Received response from Shopware:', proxyRes.statusCode, req.url);
           // Set CORS headers
-          proxyRes.headers['Access-Control-Allow-Origin'] = 'http://localhost:3001';
+          proxyRes.headers['Access-Control-Allow-Origin'] = req.headers.origin || 'http://localhost:5173';
           proxyRes.headers['Access-Control-Allow-Credentials'] = 'true';
           proxyRes.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS';
           proxyRes.headers['Access-Control-Allow-Headers'] = 'X-Requested-With, Content-Type, Authorization, sw-access-key, sw-context-token';

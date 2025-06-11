@@ -25,8 +25,11 @@ export default function LoginPage() {
   
   // Redirect if already logged in
   useEffect(() => {
-    if (user && location === '/login') {
-      setLocation('/');
+    if (user) {
+      // Wenn der Benutzer bereits eingeloggt ist, zur Dashboard-Seite weiterleiten
+      if (location === '/login' || location === '/') {
+        setLocation('/dashboard');
+      }
     }
   }, [user, location, setLocation]);
   
@@ -46,7 +49,8 @@ export default function LoginPage() {
     
     try {
       await login(data.email, data.password);
-      // No need to navigate here, AuthContext will handle redirection
+      // Nach erfolgreichem Login zur Startseite navigieren
+      setLocation('/dashboard');
     } catch (err) {
       console.error('Login error:', err);
       const errorMessage = err instanceof Error ? err.message : 'Anmeldung fehlgeschlagen. Bitte überprüfen Sie Ihre Anmeldedaten.';
