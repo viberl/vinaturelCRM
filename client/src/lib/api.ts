@@ -7,10 +7,10 @@ console.log('Environment variables:', {
   VITE_DEV: import.meta.env.VITE_DEV
 });
 
-// Determine API base URL based on environment
+// In development, use the local backend server to avoid CORS issues
 const isDev = import.meta.env.VITE_DEV === 'true';
 const API_BASE_URL = isDev 
-  ? 'http://localhost:3000'  // Local development
+  ? 'http://localhost:5000'  // Local backend server on port 5000
   : import.meta.env.VITE_API_URL || 'https://www.vinaturel.de';
 
 console.log('Using API base URL:', API_BASE_URL);

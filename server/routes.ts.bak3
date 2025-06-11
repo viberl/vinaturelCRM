@@ -1,7 +1,6 @@
 import { Express, Request, Response, NextFunction, json } from "express";
 import { createServer, Server as HttpServer } from "http";
-import { Server as SocketIOServer, Socket, DefaultEventsMap } from "socket.io";
-import type { Server as SocketIOServerType } from 'socket.io';
+import { Server as SocketIOServer, Socket } from "socket.io";
 import { storage } from "./storage";
 import { insertCustomerSchema, insertInteractionSchema } from "@shared/schema";
 import cors from "cors";
@@ -11,33 +10,9 @@ import {
   getCurrentCustomer, 
   logoutCustomer, 
   LoginResponse, 
-  CustomerData,
-  ShopwareApiError
+  CustomerData 
 } from "./shopware";
 import { auth, AuthRequest, generateToken } from "./auth";
-import jwt from 'jsonwebtoken';
-import {
-  SocketAuthData,
-  SocketUserData,
-  SocketData,
-  ClientToServerEvents,
-  ServerToClientEvents,
-  CustomSocket,
-  CustomSocketIOServer
-} from "./types/socket.types";
-
-// Extend the default Socket.IO types
-declare module 'socket.io' {
-  // Add user property to the Socket interface
-  interface Socket {
-    user?: SocketUserData;
-  }
-  
-  // Add index signature to avoid type errors
-  interface Server {
-    [key: string]: any;
-  }
-}
 
 // Load environment variables
 dotenv.config();
@@ -59,43 +34,14 @@ if (!process.env.CLIENT_URL) {
   console.warn('WARNUNG: CLIENT_URL ist nicht gesetzt. Verwende Standardwert.');
 }
 
-export async function registerRoutes(app: Express): Promise<{ httpServer: ReturnType<typeof createServer>; io: CustomSocketIOServer }> {
+export async function registerRoutes(app: Express): Promise<HttpServer> {
   // CORS wird bereits in index.ts konfiguriert
   
   // Parse JSON bodies
   app.use(json());
-  
-  // Enable pre-flight for all routes
-  app.options('*', (req, res) => {
-    res.status(200).end();
-  });
 
-  // Define interfaces for better type safety
-  interface LoginRequest {
-    email: string;
-    password: string;
-  }
-  
-  interface LoginResponseData {
-    success: boolean;
-    token?: string;
-    user?: {
-      id: string;
-      email: string;
-      firstName: string;
-      lastName: string;
-      customerNumber: string;
-      role: string;
-      contextToken?: string;
-    };
-    message?: string;
-    code?: string;
-    errorId?: string;
-    timestamp?: string;
-  }
-
-  // Login handler for both endpoints
-  const handleLogin = async (req: Request<{}, {}, LoginRequest>, res: Response<LoginResponseData>) => {
+  // Login-Handler für beide Endpunkte
+  const handleLogin = async (req: Request, res: Response) => {
     console.log('Login request received:', { 
       headers: req.headers,
       body: { ...req.body, password: req.body.password ? '***' : undefined },
@@ -111,23 +57,21 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
       // Validate request body
       if (!email || !password) {
         console.log('Missing email or password');
-        const errorResponse: LoginResponseData = { 
+        return res.status(400).json({ 
           success: false, 
           message: 'E-Mail und Passwort werden benötigt',
           code: 'MISSING_CREDENTIALS',
           timestamp: new Date().toISOString()
-        };
-        return res.status(400).json(errorResponse);
+        });
       }
 
       // Login to Shopware
       console.log('Attempting to login to Shopware...');
-      let loginResponse: LoginResponse;
+      let loginResponse;
       try {
         loginResponse = await loginCustomer(email, password);
         console.log('Shopware login successful, context token received');
-      } catch (error: unknown) {
-        const shopwareError = error as ShopwareApiError;
+      } catch (shopwareError: any) {
         console.error('Shopware login error:', {
           message: shopwareError.message,
           status: shopwareError.status,
@@ -166,7 +110,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
       
       // Get customer data
       console.log('Fetching customer data...');
-      let customer: CustomerData;
+      let customer;
       try {
         customer = await getCurrentCustomer(loginResponse.contextToken);
         console.log('Customer data received:', { 
@@ -175,8 +119,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           group: customer.group?.name,
           timestamp: new Date().toISOString()
         });
-      } catch (error: unknown) {
-        const customerError = error as ShopwareApiError;
+      } catch (customerError: any) {
         console.error('Error fetching customer data:', {
           message: customerError.message,
           status: customerError.status,
@@ -383,17 +326,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
   app.post('/api/login', handleLogin);
   app.post('/api/auth/login', handleLogin);
 
-  // Define interfaces for logout
-  interface LogoutResponseData {
-    success: boolean;
-    message?: string;
-    code?: string;
-    errorId?: string;
-    timestamp?: string;
-  }
-
   // Logout route
-  app.post('/api/auth/logout', auth, async (req: AuthRequest, res: Response<LogoutResponseData>) => {
+  app.post('/api/auth/logout', auth, async (req: AuthRequest, res: Response) => {
     const timestamp = new Date().toISOString();
     const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     
@@ -463,25 +397,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     }
   });
 
-  // Define interfaces for /me endpoint
-  interface MeResponseData {
-    success: boolean;
-    user?: {
-      id: string;
-      email: string;
-      firstName: string;
-      lastName: string;
-      customerNumber: string;
-      role: string;
-    };
-    message?: string;
-    code?: string;
-    errorId?: string;
-    timestamp?: string;
-  }
-
   // Get current user
-  app.get('/api/auth/me', auth, async (req: AuthRequest, res: Response<MeResponseData>) => {
+  app.get('/api/auth/me', auth, async (req: AuthRequest, res: Response) => {
     const timestamp = new Date().toISOString();
     const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     
@@ -549,28 +466,22 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     }
   });
 
-  // Socket.IO types are now imported from ./types/socket.types.ts
-
   // Create HTTP server
   const httpServer = createServer(app);
   
-  // Setup Socket.IO with TypeScript types
-  const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents, DefaultEventsMap, SocketData>(httpServer, {
+  // Setup Socket.IO
+  const io = new SocketIOServer(httpServer, {
     cors: {
       origin: process.env.CLIENT_URL || 'http://localhost:3000',
       methods: ['GET', 'POST'],
       credentials: true
     }
   });
-  
-  // Type assertion to our custom type
-  const typedIo = io as unknown as CustomSocketIOServer;
 
-  // Socket.IO authentication middleware with proper typing
-  io.use(async (socket: CustomSocket, next) => {
-    const auth = socket.handshake.auth as SocketAuthData;
-    const token = auth.token || 
-                 (socket.handshake.headers.authorization || '').split(' ')[1];
+  // Socket.IO authentication middleware
+  io.use(async (socket, next) => {
+    const token = socket.handshake.auth.token || 
+                 socket.handshake.headers.authorization?.split(' ')[1];
     
     if (!token) {
       console.error('Socket connection rejected: No token provided');
@@ -579,13 +490,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     
     try {
       // Verify token and attach user to socket
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key') as SocketUserData;
-      // Initialize socket.data if it doesn't exist
-      if (!socket.data) {
-        socket.data = { user: null };
-      }
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
       socket.data.user = decoded;
-      socket.user = decoded; // Also set on socket.user for backward compatibility
       next();
     } catch (error) {
       console.error('Socket authentication error:', error);
@@ -593,59 +499,22 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     }
   });
 
-  // Socket.IO event interfaces are now defined in ./types/socket.types.ts
-
-  // Socket.IO connection handler with proper typing
-  io.on('connection', (socket: CustomSocket) => {
-    // Access the user data from socket.data or socket.user
-    const user = socket.data?.user || socket.user;
+  // Socket.IO connection handler
+  io.on('connection', (socket) => {
+    const user = socket.data.user;
+    console.log('New client connected', { userId: user?.id });
     
-    if (user) {
-      console.log('New client connected', { 
-        userId: user.id,
-        email: user.email,
-        customerNumber: user.customerNumber,
-        role: user.role,
-        socketId: socket.id,
-        timestamp: new Date().toISOString()
-      });
-      
-      // Handle disconnection
-      socket.on('disconnect', (reason) => {
-        console.log('Client disconnected', {
-          userId: user.id,
-          socketId: socket.id,
-          reason,
-          timestamp: new Date().toISOString()
-        });
-      });
-      
-      // Handle errors
-      socket.on('error', (error) => {
-        console.error('Socket error:', {
-          userId: user.id,
-          error: error.message,
-          stack: error.stack,
-          timestamp: new Date().toISOString()
-        });
-      });
-      
-      // Example of handling a custom event
-      // socket.on('customEvent', (data: CustomEventData) => {
-      //   console.log('Received custom event:', { data, userId: user.id });
-      //   // Handle the event
-      // });
-    } else {
-      console.warn('Client connected without authentication', {
-        socketId: socket.id,
-        timestamp: new Date().toISOString()
-      });
-      
-      // Disconnect unauthenticated clients
-      socket.disconnect(true);
+    // Join user to their own room for private messages
+    if (user?.id) {
+      socket.join(`user_${user.id}`);
     }
+    
+    socket.on('disconnect', () => {
+      console.log('Client disconnected', { userId: user?.id });
+    });
+    
+    // Handle custom events here
   });
 
-  // Return both the HTTP server and the typed Socket.IO instance
-  return { httpServer, io: typedIo } as const;
+  return httpServer;
 }

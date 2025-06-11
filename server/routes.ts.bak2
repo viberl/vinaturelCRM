@@ -1,7 +1,6 @@
 import { Express, Request, Response, NextFunction, json } from "express";
 import { createServer, Server as HttpServer } from "http";
-import { Server as SocketIOServer, Socket, DefaultEventsMap } from "socket.io";
-import type { Server as SocketIOServerType } from 'socket.io';
+import { Server as SocketIOServer, Socket } from "socket.io";
 import { storage } from "./storage";
 import { insertCustomerSchema, insertInteractionSchema } from "@shared/schema";
 import cors from "cors";
@@ -11,33 +10,9 @@ import {
   getCurrentCustomer, 
   logoutCustomer, 
   LoginResponse, 
-  CustomerData,
-  ShopwareApiError
+  CustomerData 
 } from "./shopware";
 import { auth, AuthRequest, generateToken } from "./auth";
-import jwt from 'jsonwebtoken';
-import {
-  SocketAuthData,
-  SocketUserData,
-  SocketData,
-  ClientToServerEvents,
-  ServerToClientEvents,
-  CustomSocket,
-  CustomSocketIOServer
-} from "./types/socket.types";
-
-// Extend the default Socket.IO types
-declare module 'socket.io' {
-  // Add user property to the Socket interface
-  interface Socket {
-    user?: SocketUserData;
-  }
-  
-  // Add index signature to avoid type errors
-  interface Server {
-    [key: string]: any;
-  }
-}
 
 // Load environment variables
 dotenv.config();
@@ -59,43 +34,18 @@ if (!process.env.CLIENT_URL) {
   console.warn('WARNUNG: CLIENT_URL ist nicht gesetzt. Verwende Standardwert.');
 }
 
-export async function registerRoutes(app: Express): Promise<{ httpServer: ReturnType<typeof createServer>; io: CustomSocketIOServer }> {
-  // CORS wird bereits in index.ts konfiguriert
-  
+export async function registerRoutes(app: Express): Promise<HttpServer> {
+  // Enable CORS
+  app.use(cors({
+    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    credentials: true
+  }));
+
   // Parse JSON bodies
   app.use(json());
-  
-  // Enable pre-flight for all routes
-  app.options('*', (req, res) => {
-    res.status(200).end();
-  });
 
-  // Define interfaces for better type safety
-  interface LoginRequest {
-    email: string;
-    password: string;
-  }
-  
-  interface LoginResponseData {
-    success: boolean;
-    token?: string;
-    user?: {
-      id: string;
-      email: string;
-      firstName: string;
-      lastName: string;
-      customerNumber: string;
-      role: string;
-      contextToken?: string;
-    };
-    message?: string;
-    code?: string;
-    errorId?: string;
-    timestamp?: string;
-  }
-
-  // Login handler for both endpoints
-  const handleLogin = async (req: Request<{}, {}, LoginRequest>, res: Response<LoginResponseData>) => {
+  // Auth routes - support both /api/login and /api/auth/login for compatibility
+  const handleLogin = async (req: Request, res: Response) => {
     console.log('Login request received:', { 
       headers: req.headers,
       body: { ...req.body, password: req.body.password ? '***' : undefined },
@@ -111,23 +61,21 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
       // Validate request body
       if (!email || !password) {
         console.log('Missing email or password');
-        const errorResponse: LoginResponseData = { 
+        return res.status(400).json({ 
           success: false, 
           message: 'E-Mail und Passwort werden benötigt',
           code: 'MISSING_CREDENTIALS',
           timestamp: new Date().toISOString()
-        };
-        return res.status(400).json(errorResponse);
+        });
       }
 
       // Login to Shopware
       console.log('Attempting to login to Shopware...');
-      let loginResponse: LoginResponse;
+      let loginResponse;
       try {
         loginResponse = await loginCustomer(email, password);
         console.log('Shopware login successful, context token received');
-      } catch (error: unknown) {
-        const shopwareError = error as ShopwareApiError;
+      } catch (shopwareError: any) {
         console.error('Shopware login error:', {
           message: shopwareError.message,
           status: shopwareError.status,
@@ -155,7 +103,17 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           });
         }
         
-        // Handle other errors
+        // Handle timeout
+        if (shopwareError.code === 'ETIMEDOUT' || shopwareError.code === 'ECONNABORTED') {
+          return res.status(504).json({
+            success: false,
+            message: 'Verbindung zum Server hat zu lange gedauert. Bitte versuchen Sie es später erneut.',
+            code: 'GATEWAY_TIMEOUT',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        // For other errors, return a generic error
         return res.status(500).json({
           success: false,
           message: 'Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es später erneut.',
@@ -166,7 +124,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
       
       // Get customer data
       console.log('Fetching customer data...');
-      let customer: CustomerData;
+      let customer;
       try {
         customer = await getCurrentCustomer(loginResponse.contextToken);
         console.log('Customer data received:', { 
@@ -175,8 +133,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           group: customer.group?.name,
           timestamp: new Date().toISOString()
         });
-      } catch (error: unknown) {
-        const customerError = error as ShopwareApiError;
+      } catch (customerError: any) {
         console.error('Error fetching customer data:', {
           message: customerError.message,
           status: customerError.status,
@@ -222,7 +179,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         });
       }
 
-      // Generate JWT token
+      // Generate JWT token using the helper function
       console.log('Generating JWT token...');
       let token;
       try {
@@ -374,31 +331,6 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         message: errorMessage,
         code: errorCode,
         errorId,
-        timestamp
-      });
-    }
-  };
-  
-  // Register both login routes for backward compatibility
-  app.post('/api/login', handleLogin);
-  app.post('/api/auth/login', handleLogin);
-
-  // Define interfaces for logout
-  interface LogoutResponseData {
-    success: boolean;
-    message?: string;
-    code?: string;
-    errorId?: string;
-    timestamp?: string;
-  }
-
-  // Logout route
-  app.post('/api/auth/logout', auth, async (req: AuthRequest, res: Response<LogoutResponseData>) => {
-    const timestamp = new Date().toISOString();
-    const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-    
-    console.log('Logout request received', {
-      userId: req.user?.id,
       timestamp,
       headers: req.headers,
       ip: req.ip
@@ -458,30 +390,6 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         message: 'Fehler beim Abmelden. Ihre Sitzung wurde lokal gelöscht, aber möglicherweise nicht auf dem Server.',
         code: 'LOGOUT_ERROR',
         errorId,
-        timestamp
-      });
-    }
-  });
-
-  // Define interfaces for /me endpoint
-  interface MeResponseData {
-    success: boolean;
-    user?: {
-      id: string;
-      email: string;
-      firstName: string;
-      lastName: string;
-      customerNumber: string;
-      role: string;
-    };
-    message?: string;
-    code?: string;
-    errorId?: string;
-    timestamp?: string;
-  }
-
-  // Get current user
-  app.get('/api/auth/me', auth, async (req: AuthRequest, res: Response<MeResponseData>) => {
     const timestamp = new Date().toISOString();
     const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     
@@ -526,8 +434,9 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           lastName: req.user.lastName,
           customerNumber: req.user.customerNumber,
           role: req.user.role,
-          // Don't include sensitive data like tokens in the response
-        }
+          // Don't send context token to client in /me response
+        },
+        timestamp
       });
       
     } catch (error: any) {
@@ -539,113 +448,148 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         timestamp
       });
       
-      return res.status(500).json({
-        success: false,
-        message: 'Ein Fehler ist aufgetreten beim Abrufen der Benutzerdaten',
-        code: 'ME_ERROR',
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Fehler beim Abrufen der Benutzerdaten',
+        code: 'USER_DATA_ERROR',
         errorId,
         timestamp
       });
     }
   });
 
-  // Socket.IO types are now imported from ./types/socket.types.ts
-
-  // Create HTTP server
+  // Create HTTP server and Socket.IO instance
   const httpServer = createServer(app);
   
-  // Setup Socket.IO with TypeScript types
-  const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents, DefaultEventsMap, SocketData>(httpServer, {
-    cors: {
-      origin: process.env.CLIENT_URL || 'http://localhost:3000',
-      methods: ['GET', 'POST'],
-      credentials: true
-    }
-  });
+  // Configure CORS for Socket.IO
+  const corsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, success?: boolean) => void) => {
+      // Allow connections with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      const allowedOrigins = [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:3001',
+        'https://www.vinaturel.de',
+        'https://vinaturel.de',
+        ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
+        ...(process.env.SHOPWARE_URL ? [process.env.SHOPWARE_URL] : [])
+      ];
+      
+      const isAllowed = allowedOrigins.some(allowed => 
+        origin === allowed || 
+        origin.startsWith(allowed) ||
+        (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:')) ||
+        (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:'))
+      );
+      
+      if (isAllowed) {
+        console.log('Socket.IO connection allowed from origin:', origin);
+        return callback(null, true);
+      } else {
+        console.warn('Socket.IO connection blocked from origin:', origin);
+        return callback(new Error('Not allowed by CORS'));
+      }
+    },
+    methods: ['GET', 'POST'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Type', 'Authorization']
+  };
   
-  // Type assertion to our custom type
-  const typedIo = io as unknown as CustomSocketIOServer;
+  const io = new SocketIOServer(httpServer, {
+    cors: corsOptions,
+    path: '/socket.io/',
+    serveClient: false,
+    connectTimeout: 10000,
+    pingTimeout: 5000,
+    pingInterval: 25000
+  });
 
-  // Socket.IO authentication middleware with proper typing
-  io.use(async (socket: CustomSocket, next) => {
-    const auth = socket.handshake.auth as SocketAuthData;
-    const token = auth.token || 
+  // Socket.IO connection handling with authentication and error handling
+  io.on('connection', (socket: Socket) => {
+    const clientId = socket.id;
+    const clientIp = socket.handshake.address;
+    const userAgent = socket.handshake.headers['user-agent'] || 'unknown';
+    const timestamp = new Date().toISOString();
+    
+    console.log('New client connected', {
+      clientId,
+      clientIp,
+      userAgent,
+      query: socket.handshake.query,
+      timestamp
+    });
+    
+    // Authentication middleware
+    const token = socket.handshake.auth.token || 
+                 socket.handshake.query.token ||
                  (socket.handshake.headers.authorization || '').split(' ')[1];
     
     if (!token) {
-      console.error('Socket connection rejected: No token provided');
-      return next(new Error('Authentication error: No token provided'));
+      console.warn('Client connected without authentication token', { clientId, timestamp });
+      socket.emit('unauthorized', { 
+        success: false, 
+        message: 'Authentication token is required',
+        timestamp
+      });
+      return socket.disconnect(true);
     }
     
-    try {
-      // Verify token and attach user to socket
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key') as SocketUserData;
-      // Initialize socket.data if it doesn't exist
-      if (!socket.data) {
-        socket.data = { user: null };
-      }
-      socket.data.user = decoded;
-      socket.user = decoded; // Also set on socket.user for backward compatibility
-      next();
-    } catch (error) {
-      console.error('Socket authentication error:', error);
-      next(new Error('Authentication error: Invalid token'));
-    }
-  });
-
-  // Socket.IO event interfaces are now defined in ./types/socket.types.ts
-
-  // Socket.IO connection handler with proper typing
-  io.on('connection', (socket: CustomSocket) => {
-    // Access the user data from socket.data or socket.user
-    const user = socket.data?.user || socket.user;
+    // TODO: Verify JWT token here if needed
+    // try {
+    //   const decoded = verifyToken(token);
+    //   socket.data.user = decoded;
+    // } catch (error) {
+    //   console.warn('Invalid authentication token', { clientId, error, timestamp });
+    //   socket.emit('unauthorized', { 
+    //     success: false, 
+    //     message: 'Invalid or expired token',
+    //     timestamp
+    //   });
+    //   return socket.disconnect(true);
+    // }
     
-    if (user) {
-      console.log('New client connected', { 
-        userId: user.id,
-        email: user.email,
-        customerNumber: user.customerNumber,
-        role: user.role,
-        socketId: socket.id,
-        timestamp: new Date().toISOString()
+    // Log successful authentication
+    console.log('Client authenticated', { 
+      clientId, 
+      // userId: socket.data.user?.id,
+      timestamp 
+    });
+    
+    // Handle disconnection
+    socket.on('disconnect', (reason) => {
+      console.log('Client disconnected', { 
+        clientId, 
+        // userId: socket.data.user?.id, 
+        reason,
+        timestamp: new Date().toISOString() 
       });
-      
-      // Handle disconnection
-      socket.on('disconnect', (reason) => {
-        console.log('Client disconnected', {
-          userId: user.id,
-          socketId: socket.id,
-          reason,
-          timestamp: new Date().toISOString()
-        });
+    });
+    
+    // Handle errors
+    socket.on('error', (error) => {
+      console.error('Socket error', { 
+        clientId, 
+        // userId: socket.data.user?.id, 
+        error: error.message,
+        stack: error.stack,
+        timestamp: new Date().toISOString() 
       });
-      
-      // Handle errors
-      socket.on('error', (error) => {
-        console.error('Socket error:', {
-          userId: user.id,
-          error: error.message,
-          stack: error.stack,
-          timestamp: new Date().toISOString()
-        });
-      });
-      
-      // Example of handling a custom event
-      // socket.on('customEvent', (data: CustomEventData) => {
-      //   console.log('Received custom event:', { data, userId: user.id });
-      //   // Handle the event
-      // });
-    } else {
-      console.warn('Client connected without authentication', {
-        socketId: socket.id,
-        timestamp: new Date().toISOString()
-      });
-      
-      // Disconnect unauthenticated clients
-      socket.disconnect(true);
-    }
+    });
+  });
+  
+  // Handle Socket.IO server errors
+  io.engine.on('connection_error', (err) => {
+    console.error('Socket.IO connection error:', {
+      message: err.message,
+      code: err.code,
+      context: err.context,
+      timestamp: new Date().toISOString()
+    });
   });
 
-  // Return both the HTTP server and the typed Socket.IO instance
-  return { httpServer, io: typedIo } as const;
+  return httpServer;
 }

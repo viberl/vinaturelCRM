@@ -1,9 +1,10 @@
 import axios, { AxiosResponse, AxiosError } from 'axios';
 
 // Custom error class for Shopware API errors
-class ShopwareApiError extends Error {
+export class ShopwareApiError extends Error {
   response?: any;
   status?: number;
+  code?: string | number;
   
   constructor(message: string, response?: any, status?: number) {
     super(message);

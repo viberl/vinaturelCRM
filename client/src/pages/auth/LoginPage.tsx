@@ -62,15 +62,15 @@ export default function LoginPage() {
         <CardHeader className="space-y-4">
           <div className="flex justify-center">
             <img 
-              src="/Vinaturel-Logo-grün.png" 
+              src="/VinaturelLogo.png" 
               alt="Vinaturel Logo" 
               className="h-24 w-auto object-contain" 
             />
           </div>
           <div className="space-y-1 text-center">
-            <CardTitle className="text-2xl font-bold">Willkommen zurück</CardTitle>
+            <CardTitle className="text-2xl font-bold">Willkommen beim Vinaturel-CRM</CardTitle>
             <CardDescription>
-              Bitte melden Sie sich mit Ihren Zugangsdaten an
+              Bitte melden Sie sich mit Ihren Shopware-Zugangsdaten an
             </CardDescription>
           </div>
         </CardHeader>
