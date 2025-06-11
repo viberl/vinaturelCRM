@@ -72,33 +72,72 @@ const corsOptions = {
   maxAge: 86400 // 24 hours
 };
 
+// CORS configuration
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+  'https://www.vinaturel.de',
+  'https://vinaturel.de',
+  ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
+  ...(process.env.SHOPWARE_URL ? [process.env.SHOPWARE_URL] : [])
+].filter(Boolean) as string[];
+
 // Apply CORS middleware with custom headers
 app.use((req, res, next) => {
   const origin = req.headers.origin || '';
   
   // Check if origin is allowed
-  const allowedOrigins = [
-    'http://localhost:3001',
-    'http://localhost:3000',
-    'http://127.0.0.1:3001',
-    'http://127.0.0.1:3000',
-    process.env.CLIENT_URL,
-    process.env.SHOPWARE_URL || 'https://vinaturel.de'
-  ].filter(Boolean) as string[];
+  const isAllowed = allowedOrigins.some(allowed => {
+    // Exact match
+    if (origin === allowed) return true;
+    
+    // Match with protocol and port
+    if (origin.startsWith(allowed)) return true;
+    
+    // Match localhost with any port
+    if (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:')) return true;
+    
+    // Match 127.0.0.1 with any port
+    if (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:')) return true;
+    
+    return false;
+  });
   
-  if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
+  if (isAllowed) {
+    console.log(`[CORS] Allowing origin: ${origin}`);
     res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, sw-context-token, sw-access-key');
-    res.header('Access-Control-Expose-Headers', 'Content-Range, X-Total-Count, sw-context-token, sw-access-key');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, sw-access-key, sw-context-token');
+    res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range, X-Total-Count, sw-context-token, sw-access-key');
+    
+    // Handle preflight requests
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+  } else {
+    console.warn(`[CORS] Blocked origin: ${origin}`);
   }
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
+    console.log('[CORS] Handling preflight request');
     return res.status(200).end();
   }
   
+  next();
+});
+
+// Log all incoming requests for debugging
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`, {
+    headers: req.headers,
+    body: req.body,
+    query: req.query,
+    params: req.params
+  });
   next();
 });
 

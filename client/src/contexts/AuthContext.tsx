@@ -1,7 +1,8 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import axios from 'axios';
 import api from '@/lib/api';
 
-export interface User {
+interface User {
   id: string;
   email: string;
   firstName: string;
@@ -13,7 +14,7 @@ export interface User {
 
 interface AuthContextType {
   user: User | null;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<User>;
   logout: () => Promise<void>;
   loading: boolean;
   error: string | null;
@@ -23,34 +24,18 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const checkAuth = async () => {
       const token = localStorage.getItem('authToken');
-      
       if (token) {
         try {
-          // Get current user data
-          const response = await api.get('/auth/me');
-          
-          if (response.data.success && response.data.user) {
-            setUser({
-              id: response.data.user.id,
-              email: response.data.user.email,
-              firstName: response.data.user.firstName,
-              lastName: response.data.user.lastName,
-              customerNumber: response.data.user.customerNumber,
-              role: response.data.user.role,
-              contextToken: response.data.user.contextToken
-            });
-          } else {
-            throw new Error('Ungültige Benutzerdaten erhalten');
-          }
+          const response = await api.get('/api/auth/me');
+          setUser(response.data);
         } catch (err) {
           console.error('Auth check failed:', err);
-          // Clear invalid token
           localStorage.removeItem('authToken');
           setError('Fehler bei der Authentifizierung. Bitte melden Sie sich erneut an.');
         } finally {
@@ -67,31 +52,74 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (email: string, password: string) => {
     setLoading(true);
     setError(null);
+    
+    console.log('Starting login process...');
+    
     try {
-      const response = await api.post('/auth/login', { email, password });
+      console.log('Sending login request to /api/auth/login');
       
-      if (response.data.success && response.data.token) {
-        // Store the token
-        localStorage.setItem('authToken', response.data.token);
-        
-        // Set user data
-        setUser({
-          id: response.data.user.id,
-          email: response.data.user.email,
-          firstName: response.data.user.firstName,
-          lastName: response.data.user.lastName,
-          customerNumber: response.data.user.customerNumber,
-          role: response.data.user.role,
-          contextToken: response.data.user.contextToken
-        });
-      } else {
+      const response = await api.post('/api/auth/login', {
+        email,
+        password
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        withCredentials: true
+      });
+      
+      console.log('Login response received:', response);
+      
+      const { user: userData, token } = response.data;
+      
+      if (!userData || !token) {
+        console.error('Invalid response from server:', response.data);
         throw new Error('Ungültige Antwort vom Server');
       }
+      
+      console.log('User data received:', userData);
+      
+      const user: User = {
+        id: userData.id,
+        email: userData.email,
+        firstName: userData.firstName || '',
+        lastName: userData.lastName || '',
+        customerNumber: userData.customerNumber || '',
+        role: userData.role || 'customer',
+        contextToken: token
+      };
+      
+      console.log('Setting auth token in localStorage');
+      localStorage.setItem('authToken', token);
+      
+      console.log('Updating user state');
+      setUser(user);
+      
+      return user;
     } catch (err: any) {
-      console.error('Login error:', err);
-      const errorMessage = err.response?.data?.message || 
-                         err.message || 
-                         'Anmeldung fehlgeschlagen. Bitte versuchen Sie es später erneut.';
+      console.error('Login error:', {
+        message: err.message,
+        response: err.response?.data,
+        status: err.response?.status,
+        config: {
+          url: err.config?.url,
+          method: err.config?.method,
+          headers: err.config?.headers,
+          data: err.config?.data
+        }
+      });
+      
+      let errorMessage = 'Anmeldung fehlgeschlagen. Bitte überprüfen Sie Ihre Anmeldedaten.';
+      
+      if (err.response) {
+        // Server responded with an error status code
+        errorMessage = err.response.data?.message || err.message || errorMessage;
+      } else if (err.request) {
+        // Request was made but no response was received
+        errorMessage = 'Keine Antwort vom Server. Bitte überprüfen Sie Ihre Internetverbindung.';
+      }
+      
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
@@ -101,15 +129,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
-      // Call logout API if user is logged in
-      if (user?.contextToken) {
-        await api.post('/auth/logout');
-      }
+      await api.post('/api/auth/logout');
     } catch (err) {
-      console.error('Logout error:', err);
-      // Continue with local logout even if API call fails
+      console.error('Logout failed:', err);
     } finally {
-      // Clear local auth state
       localStorage.removeItem('authToken');
       setUser(null);
     }
@@ -125,7 +148,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 export function useAuth() {
   const context = useContext(AuthContext);
   if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
+    throw new Error('useAuth muss innerhalb eines AuthProviders verwendet werden');
   }
   return context;
 }
+
+export default AuthProvider;

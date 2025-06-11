@@ -73,31 +73,78 @@ const ACCESS_KEY = process.env.SHOPWARE_ACCESS_KEY || '';
  * Login a customer using email and password
  */
 export const loginCustomer = async (email: string, password: string): Promise<LoginResponse> => {
+  const url = `${BASE_URL}/store-api/account/login`;
+  const requestData = { username: email, password };
+  const headers = {
+    'sw-access-key': ACCESS_KEY,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'sw-language-id': '2fbb5fe2e29a472d9ceacaa9a841cd51', // Default language ID
+    'sw-version-id': '0fa91ce3e96a4bc2be4bd9ce752c3425' // Default sales channel version ID
+  };
+
+  console.log('Sending login request to Shopware:', {
+    url,
+    headers: {
+      ...headers,
+      'sw-access-key': '***REDACTED***' // Don't log the actual access key
+    },
+    data: { ...requestData, password: '***REDACTED***' },
+    timeout: 10000 // 10 seconds timeout
+  });
+
   try {
     const response = await axios.post<LoginResponse>(
-      `${BASE_URL}/store-api/account/login`,
-      { username: email, password },
+      url,
+      requestData,
       {
-        headers: {
-          'sw-access-key': ACCESS_KEY,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
+        headers,
+        timeout: 10000, // 10 seconds timeout
+        maxRedirects: 5,
+        validateStatus: (status) => status >= 200 && status < 500 // Don't throw for 4xx errors
       }
     );
     
+    console.log('Shopware login response:', {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      data: {
+        ...response.data,
+        contextToken: response.data?.contextToken ? '***REDACTED***' : 'MISSING'
+      }
+    });
+    
     if (!response.data?.contextToken) {
-      throw new Error('No context token received from Shopware');
+      throw new ShopwareApiError(
+        'No context token received from Shopware',
+        response.data,
+        response.status
+      );
     }
     
     return response.data;
   } catch (error: any) {
-    console.error('Shopware login error details:', {
+    const errorDetails = {
       message: error.message,
-      response: error.response?.data,
+      code: error.code,
       status: error.response?.status,
-      headers: error.response?.headers
-    });
+      statusText: error.response?.statusText,
+      response: error.response?.data,
+      config: {
+        url: error.config?.url,
+        method: error.config?.method,
+        headers: {
+          ...error.config?.headers,
+          'sw-access-key': '***REDACTED***'
+        },
+        timeout: error.config?.timeout,
+        timeoutErrorMessage: error.config?.timeoutErrorMessage
+      },
+      stack: error.stack
+    };
+    
+    console.error('Shopware login error:', errorDetails);
     
     // Create a more detailed error
     const errorMessage = error.response?.data?.errors?.[0]?.detail || 
@@ -117,23 +164,85 @@ export const loginCustomer = async (email: string, password: string): Promise<Lo
  * Get current customer data using context token
  */
 export const getCurrentCustomer = async (contextToken: string): Promise<CustomerData> => {
+  const url = `${BASE_URL}/store-api/account/customer`;
+  const headers = {
+    'sw-access-key': ACCESS_KEY,
+    'sw-context-token': contextToken,
+    'Accept': 'application/json',
+    'sw-language-id': '2fbb5fe2e29a472d9ceacaa9a841cd51', // Default language ID
+    'sw-version-id': '0fa91ce3e96a4bc2be4bd9ce752c3425' // Default sales channel version ID
+  };
+
+  console.log('Fetching customer data from Shopware:', {
+    url,
+    headers: {
+      ...headers,
+      'sw-access-key': '***REDACTED***',
+      'sw-context-token': contextToken ? '***REDACTED***' : 'MISSING'
+    },
+    timeout: 10000 // 10 seconds timeout
+  });
+
   try {
     const response = await axios.get<{ data: CustomerData }>(
-      `${BASE_URL}/store-api/account/customer`,
+      url,
       {
-        headers: {
-          'sw-access-key': ACCESS_KEY,
-          'sw-context-token': contextToken,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
+        headers,
+        timeout: 10000, // 10 seconds timeout
+        maxRedirects: 5,
+        validateStatus: (status) => status >= 200 && status < 500 // Don't throw for 4xx errors
       }
     );
     
+    console.log('Customer data response:', {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      data: response.data ? '***DATA_RECEIVED***' : 'NO_DATA'
+    });
+    
+    if (!response.data?.data) {
+      throw new ShopwareApiError(
+        'No customer data received from Shopware',
+        response.data,
+        response.status
+      );
+    }
+    
     return response.data.data;
   } catch (error: any) {
-    console.error('Error fetching customer data:', error.response?.data || error.message);
-    throw new Error('Kundendaten konnten nicht abgerufen werden');
+    const errorDetails = {
+      message: error.message,
+      code: error.code,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      response: error.response?.data,
+      config: {
+        url: error.config?.url,
+        method: error.config?.method,
+        headers: {
+          ...error.config?.headers,
+          'sw-access-key': '***REDACTED***',
+          'sw-context-token': '***REDACTED***'
+        },
+        timeout: error.config?.timeout,
+        timeoutErrorMessage: error.config?.timeoutErrorMessage
+      },
+      stack: error.stack
+    };
+    
+    console.error('Error fetching customer data:', errorDetails);
+    
+    // Create a more detailed error
+    const errorMessage = error.response?.data?.errors?.[0]?.detail || 
+                        error.response?.data?.message ||
+                        error.message;
+    
+    throw new ShopwareApiError(
+      `Failed to fetch customer data: ${errorMessage}`,
+      error.response?.data,
+      error.response?.status
+    );
   }
 };
 
@@ -141,22 +250,72 @@ export const getCurrentCustomer = async (contextToken: string): Promise<Customer
  * Logout customer by invalidating the context token
  */
 export const logoutCustomer = async (contextToken: string): Promise<boolean> => {
+  const url = `${BASE_URL}/store-api/account/logout`;
+  const headers = {
+    'sw-access-key': ACCESS_KEY,
+    'sw-context-token': contextToken,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'sw-language-id': '2fbb5fe2e29a472d9ceacaa9a841cd51', // Default language ID
+    'sw-version-id': '0fa91ce3e96a4bc2be4bd9ce752c3425' // Default sales channel version ID
+  };
+
+  console.log('Logging out customer from Shopware:', {
+    url,
+    headers: {
+      ...headers,
+      'sw-access-key': '***REDACTED***',
+      'sw-context-token': contextToken ? '***REDACTED***' : 'MISSING'
+    },
+    timeout: 10000 // 10 seconds timeout
+  });
+
   try {
-    await axios.post(
-      `${BASE_URL}/store-api/account/logout`,
+    const response = await axios.post(
+      url,
       {},
       {
-        headers: {
-          'sw-access-key': ACCESS_KEY,
-          'sw-context-token': contextToken,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
+        headers,
+        timeout: 10000, // 10 seconds timeout
+        maxRedirects: 5,
+        validateStatus: (status) => status >= 200 && status < 500 // Don't throw for 4xx errors
       }
     );
-    return true;
+    
+    console.log('Logout response:', {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      data: response.data || 'NO_DATA'
+    });
+    
+    // Consider any 2xx status code as success
+    return response.status >= 200 && response.status < 300;
   } catch (error: any) {
-    console.error('Logout error:', error.response?.data || error.message);
-    return false;
+    const errorDetails = {
+      message: error.message,
+      code: error.code,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      response: error.response?.data,
+      config: {
+        url: error.config?.url,
+        method: error.config?.method,
+        headers: {
+          ...error.config?.headers,
+          'sw-access-key': '***REDACTED***',
+          'sw-context-token': '***REDACTED***'
+        },
+        timeout: error.config?.timeout,
+        timeoutErrorMessage: error.config?.timeoutErrorMessage
+      },
+      stack: error.stack
+    };
+    
+    console.error('Logout error:', errorDetails);
+    
+    // Even if logout fails, we should still consider it successful from our side
+    // since the session will expire eventually on the server
+    return true;
   }
 };
