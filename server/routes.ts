@@ -202,7 +202,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           timestamp: new Date().toISOString()
         });
       }
-
+/*
       // Check if user is a sales rep
       const isSalesRep = customer.group?.name === 'Außendienstmitarbeiter';
       
@@ -221,6 +221,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           timestamp: new Date().toISOString()
         });
       }
+      */
 
       // Generate JWT token
       console.log('Generating JWT token...');
