@@ -5,16 +5,19 @@ import jwt, { SignOptions } from 'jsonwebtoken';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '8h';
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  role: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  customerNumber?: string | null;
+  salesRepEmail?: string | null;
+  salesRepId?: string | null;
+}
+
 export interface AuthRequest extends Request {
-  user?: {
-    id: string;
-    email: string;
-    firstName: string;
-    lastName: string;
-    customerNumber: string;
-    role: string;
-    contextToken?: string;
-  };
+  user?: AuthUser;
 }
 
 /**
@@ -22,37 +25,33 @@ export interface AuthRequest extends Request {
  */
 export const auth = (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    // Get token from Authorization header
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Kein Authentifizierungstoken gefunden' 
+    const authorization = req.headers.authorization;
+    if (!authorization || !authorization.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Kein Authentifizierungstoken gefunden'
       });
     }
 
-    const token = authHeader.split(' ')[1];
-    if (!token) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Ungültiges Token-Format' 
-      });
+    const token = authorization.split(' ')[1];
+
+    const decoded = jwt.verify(token, JWT_SECRET) as Partial<AuthUser>;
+
+    if (!decoded.id || !decoded.email) {
+      throw new Error('Token ohne Benutzerinformationen');
     }
 
-    // Verify token
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    
-    // Add user to request
     req.user = {
       id: decoded.id,
       email: decoded.email,
-      firstName: decoded.firstName || '',
-      lastName: decoded.lastName || '',
-      customerNumber: decoded.customerNumber || '',
-      role: decoded.role || 'customer',
-      contextToken: decoded.contextToken
+      role: decoded.role || 'sales_rep',
+      firstName: decoded.firstName ?? null,
+      lastName: decoded.lastName ?? null,
+      customerNumber: decoded.customerNumber ?? null,
+      salesRepEmail: decoded.salesRepEmail ?? null,
+      salesRepId: decoded.salesRepId ?? null
     };
-    
+
     next();
   } catch (error) {
     console.error('Auth middleware error:', error);
@@ -103,23 +102,16 @@ export function createAuthRouter() {
 /**
  * Generate a JWT token for the user
  */
-export const generateToken = (userData: {
-  id: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  customerNumber: string;
-  role: string;
-  contextToken?: string;
-}): string => {
-  const payload = {
+export const generateToken = (userData: AuthUser): string => {
+  const payload: Partial<AuthUser> = {
     id: userData.id,
     email: userData.email,
-    firstName: userData.firstName,
-    lastName: userData.lastName,
-    customerNumber: userData.customerNumber,
     role: userData.role,
-    contextToken: userData.contextToken
+    firstName: userData.firstName ?? null,
+    lastName: userData.lastName ?? null,
+    customerNumber: userData.customerNumber ?? null,
+    salesRepEmail: userData.salesRepEmail ?? null,
+    salesRepId: userData.salesRepId ?? null
   };
   
   // Handle different expiresIn formats

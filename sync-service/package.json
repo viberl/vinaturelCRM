@@ -1,0 +1,30 @@
+{
+  "name": "shopware-sync-service",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node --loader ts-node/esm src/sync-service.ts",
+    "sync": "node --loader ts-node/esm src/sync-service.ts --once",
+    "sync:watch": "node --loader ts-node/esm src/sync-service.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio",
+    "build": "tsc",
+    "start:prod": "node dist/sync-service.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.16.2",
+    "axios": "^1.6.0",
+    "chalk": "^5.3.0",
+    "commander": "^11.1.0",
+    "dotenv": "^16.3.1",
+    "luxon": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/luxon": "^3.3.3",
+    "prisma": "^6.16.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  }
+}

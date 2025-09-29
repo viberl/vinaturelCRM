@@ -1,0 +1,244 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("POSTGRES_URL")
+}
+
+model SalesRep {
+  id         String   @id
+  email      String   @unique
+  firstName  String?
+  lastName   String?
+  customers  CustomerToSalesRep[]
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+
+
+  @@map("sales_rep")
+}
+
+model Customer {
+  id         String   @id
+  email      String
+  company    String?
+  firstName  String?
+  lastName   String?
+  street     String?
+  city       String?
+  zip        String?
+  country    String?
+  phone      String?
+  latitude   Float?
+  longitude  Float?
+  customerNumber String?
+  customerGroup  String?
+  priceGroup     String?
+  totalRevenue   Float?
+  orderCount     Int?
+  salesReps  CustomerToSalesRep[]
+  lastContactAt DateTime?
+  interactions CustomerInteraction[]
+  tasks       Task[]
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+
+
+  @@map("customer")
+  @@unique([email])
+}
+
+enum InteractionType {
+  phone
+  email
+  meeting
+  chat
+}
+
+model CustomerInteraction {
+  id               String           @id @default(uuid())
+  customerId       String
+  type             InteractionType
+  occurredAt       DateTime
+  employee         String?
+  durationSeconds  Int?
+  topic            String?
+  result           String?
+  notes            String?
+  attachmentsCount Int?
+  followUpTitle    String?
+  followUpDueDate  DateTime?
+  followUpAssignee String?
+  followUpPriority String?
+  followUpReminder String?
+  metadata         Json?
+  followUpTaskId   String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  followUpTask Task? @relation("TaskFollowUp", fields: [followUpTaskId], references: [id], onDelete: SetNull)
+
+  @@index([customerId])
+  @@map("customer_interaction")
+}
+
+enum TaskStatus {
+  open
+  in_progress
+  waiting
+  completed
+}
+
+enum TaskPriority {
+  low
+  medium
+  high
+}
+
+enum TaskCategory {
+  follow_up
+  tasting
+  campaign
+  other
+}
+
+model Task {
+  id            String        @id @default(uuid())
+  title         String
+  description   String?
+  status        TaskStatus    @default(open)
+  priority      TaskPriority  @default(medium)
+  category      TaskCategory  @default(other)
+  customerId    String?
+  assignedToId  String?
+  createdById   String?
+  startAt       DateTime?
+  dueAt         DateTime?
+  completedAt   DateTime?
+  startedAt     DateTime?
+  slaMinutes    Int?
+  metadata      Json?
+  attachments   TaskAttachment[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  customer      Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  assignedTo    CrmUser?      @relation("TaskAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  createdBy     CrmUser?      @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  followUpInteractions CustomerInteraction[] @relation("TaskFollowUp")
+  dependenciesFrom TaskDependency[] @relation("TaskDependenciesFrom")
+  dependenciesTo   TaskDependency[] @relation("TaskDependenciesTo")
+  watchers      TaskWatcher[]
+
+  @@index([customerId])
+  @@index([assignedToId])
+  @@index([status])
+  @@index([dueAt])
+  @@map("task")
+}
+
+model TaskDependency {
+  id             String   @id @default(uuid())
+  predecessorId  String
+  successorId    String
+  relationType   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  predecessor Task @relation("TaskDependenciesFrom", fields: [predecessorId], references: [id], onDelete: Cascade)
+  successor   Task @relation("TaskDependenciesTo", fields: [successorId], references: [id], onDelete: Cascade)
+
+  @@unique([predecessorId, successorId])
+  @@map("task_dependency")
+}
+
+model TaskWatcher {
+  id        String   @id @default(uuid())
+  taskId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  task Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user CrmUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, userId])
+  @@map("task_watcher")
+}
+
+model TaskAttachment {
+  id          String   @id @default(uuid())
+  taskId      String
+  fileName    String
+  fileUrl     String
+  uploadedBy  String?
+  uploadedAt  DateTime @default(now())
+
+  task     Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploader CrmUser? @relation("TaskAttachmentUploader", fields: [uploadedBy], references: [id])
+
+  @@map("task_attachment")
+  @@index([taskId])
+}
+
+model CustomerToSalesRep {
+  salesRep    SalesRep @relation(fields: [salesRepId], references: [id])
+  salesRepId  String
+  customer    Customer @relation(fields: [customerId], references: [id])
+  customerId  String
+  assignedAt  DateTime @default(now())
+
+  @@id([salesRepId, customerId])
+  @@map("sales_rep_customer")
+}
+
+model SyncSettings {
+  id          Int       @id @default(1)
+  lastSync    DateTime?
+  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime  @default(now())
+
+
+  @@map("sync_settings")
+}
+
+model CrmUser {
+  id                 String   @id @default(uuid())
+  email              String   @unique
+  passwordHash       String
+  firstName          String?
+  lastName           String?
+  salesRepEmail      String?
+  salesRepId         String?
+  role               String   @default("sales_rep")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  microsoftCredential MicrosoftCredential?
+  assignedTasks       Task[] @relation("TaskAssignedTo")
+  createdTasks        Task[] @relation("TaskCreatedBy")
+  watchingTasks       TaskWatcher[]
+  taskUploads         TaskAttachment[] @relation("TaskAttachmentUploader")
+
+  @@map("crm_users")
+}
+
+model MicrosoftCredential {
+  id           Int       @id @default(autoincrement())
+  crmUserId    String    @unique
+  accessToken  String
+  refreshToken String?
+  scope        String?
+  tokenType    String?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  crmUser CrmUser @relation(fields: [crmUserId], references: [id], onDelete: Cascade)
+
+  @@map("microsoft_credentials")
+}

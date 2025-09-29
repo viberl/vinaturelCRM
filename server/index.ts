@@ -192,19 +192,23 @@ app.use((req, res, next) => {
   next();
 });
 
+// Wrap in an async IIFE to use top-level await
 (async () => {
-  // Get HTTP server and Socket.IO instance from registerRoutes
+  // First, register all API routes
   const { httpServer, io } = await registerRoutes(app);
 
-  // In development, use Vite's middleware for serving and HMR
+  // Then, set up the frontend
   if (process.env.NODE_ENV === 'development') {
     await setupVite(app, httpServer);
   } else {
-    // In production, serve static files from the dist directory
     serveStatic(app);
   }
-  
+    
   // Handle 404 for API routes
+  app.use('/admin-api/*', (req, res) => {
+    res.status(404).json({ message: 'Admin API endpoint not found' });
+  });
+  
   app.use('/api/*', (req, res) => {
     res.status(404).json({ message: 'API endpoint not found' });
   });

@@ -68,21 +68,95 @@ export interface CustomerData {
 }
 
 const BASE_URL = process.env.SHOPWARE_URL || 'https://vinaturel.de';
-const ACCESS_KEY = process.env.SHOPWARE_ACCESS_KEY || '';
+const ACCESS_KEY = process.env.SHOPWARE_ACCESS_KEY || process.env.VITE_SHOPWARE_ACCESS_KEY || '';
+
+const LANGUAGE_ID = '2fbb5fe2e29a472d9ceacaa9a841cd51';
+const VERSION_ID = '0fa91ce3e96a4bc2be4bd9ce752c3425';
+
+const normaliseHeaderValue = (value: string | string[] | undefined): string | undefined => {
+  if (!value) return undefined;
+  return Array.isArray(value) ? value[0] : value;
+};
+
+const createGuestSession = async (): Promise<string> => {
+  const url = `${BASE_URL}/store-api/checkout/cart`;
+  const headers = {
+    'sw-access-key': ACCESS_KEY,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'sw-language-id': LANGUAGE_ID,
+    'sw-version-id': VERSION_ID
+  };
+
+  console.log('Creating guest session in Shopware:', {
+    url,
+    headers: {
+      ...headers,
+      'sw-access-key': '***REDACTED***'
+    }
+  });
+
+  const response = await axios.post(
+    url,
+    {},
+    {
+      headers,
+      timeout: 10000,
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 500
+    }
+  );
+
+  const headerToken = normaliseHeaderValue(response.headers['sw-context-token']);
+  const bodyToken = (response.data as any)?.token as string | undefined;
+  const contextToken = headerToken || bodyToken;
+
+  if (!contextToken) {
+    console.error('Failed to obtain guest session context token', {
+      status: response.status,
+      headers: response.headers,
+      data: response.data
+    });
+    throw new ShopwareApiError('No context token received while creating guest session', response.data, response.status);
+  }
+
+  return contextToken;
+};
 
 /**
  * Login a customer using email and password
  */
 export const loginCustomer = async (email: string, password: string): Promise<LoginResponse> => {
   const url = `${BASE_URL}/store-api/account/login`;
-  const requestData = { username: email, password };
-  const headers = {
+  const requestData = {
+    username: email,
+    email,
+    password,
+    include: ['customer', 'contextToken']
+  };
+
+  let guestContextToken: string | undefined;
+  try {
+    guestContextToken = await createGuestSession();
+  } catch (error) {
+    const err = error as ShopwareApiError;
+    console.warn('Guest session could not be created, continuing without it', {
+      message: err.message,
+      status: err.status
+    });
+  }
+
+  const headers: Record<string, string> = {
     'sw-access-key': ACCESS_KEY,
     'Content-Type': 'application/json',
     'Accept': 'application/json',
-    'sw-language-id': '2fbb5fe2e29a472d9ceacaa9a841cd51', // Default language ID
-    'sw-version-id': '0fa91ce3e96a4bc2be4bd9ce752c3425' // Default sales channel version ID
+    'sw-language-id': LANGUAGE_ID,
+    'sw-version-id': VERSION_ID
   };
+
+  if (guestContextToken) {
+    headers['sw-context-token'] = guestContextToken;
+  }
 
   console.log('Sending login request to Shopware:', {
     url,
@@ -116,15 +190,20 @@ export const loginCustomer = async (email: string, password: string): Promise<Lo
       }
     });
     
-    if (!response.data?.contextToken) {
+    const contextToken = response.data?.contextToken || normaliseHeaderValue(response.headers['sw-context-token']);
+
+    if (!contextToken) {
       throw new ShopwareApiError(
         'No context token received from Shopware',
         response.data,
         response.status
       );
     }
-    
-    return response.data;
+
+    return {
+      ...response.data,
+      contextToken
+    };
   } catch (error: any) {
     const errorDetails = {
       message: error.message,
@@ -185,7 +264,7 @@ export const getCurrentCustomer = async (contextToken: string): Promise<Customer
   });
 
   try {
-    const response = await axios.get<{ data: CustomerData }>(
+    const response = await axios.get(
       url,
       {
         headers,
@@ -202,7 +281,9 @@ export const getCurrentCustomer = async (contextToken: string): Promise<Customer
       data: response.data ? '***DATA_RECEIVED***' : 'NO_DATA'
     });
     
-    if (!response.data?.data) {
+    const customerData = (response.data as { data?: CustomerData })?.data ?? response.data;
+
+    if (!customerData || !customerData.id) {
       throw new ShopwareApiError(
         'No customer data received from Shopware',
         response.data,
@@ -210,7 +291,7 @@ export const getCurrentCustomer = async (contextToken: string): Promise<Customer
       );
     }
     
-    return response.data.data;
+    return customerData as CustomerData;
   } catch (error: any) {
     const errorDetails = {
       message: error.message,

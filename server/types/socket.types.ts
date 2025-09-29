@@ -9,10 +9,12 @@ export interface SocketAuthData {
 export interface SocketUserData {
   id: string;
   email: string;
-  firstName: string;
-  lastName: string;
-  customerNumber: string;
   role: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  customerNumber?: string | null;
+  salesRepEmail?: string | null;
+  salesRepId?: string | null;
   contextToken?: string;
 }
 

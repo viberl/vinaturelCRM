@@ -8,9 +8,20 @@ console.log('Environment variables:', {
   VITE_SHOPWARE_ACCESS_KEY: import.meta.env.VITE_SHOPWARE_ACCESS_KEY
 });
 
-// Base‑URL: always the one from env
-const API_BASE_URL = import.meta.env.VITE_API_URL;
-console.log('Using API base URL:', API_BASE_URL);
+const resolveApiBaseUrl = () => {
+  if (import.meta.env.VITE_BACKEND_URL) {
+    return import.meta.env.VITE_BACKEND_URL;
+  }
+
+  if (typeof window !== 'undefined') {
+    return '';
+  }
+
+  return import.meta.env.VITE_API_URL;
+};
+
+const API_BASE_URL = resolveApiBaseUrl();
+console.log('Using API base URL:', API_BASE_URL || '[relative to origin]');
 
 // Axios instance
 const api = axios.create({
@@ -28,6 +39,8 @@ api.interceptors.request.use(cfg => {
   // add stored context token (if any)
   const token = localStorage.getItem('authToken');
   if (token) cfg.headers.set('sw-context-token', token);
+  const jwt = localStorage.getItem('jwtToken');
+  if (jwt) cfg.headers.set('Authorization', `Bearer ${jwt}`);
   return cfg;
 });
 

@@ -61,8 +61,8 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-      <Card className="w-full max-w-md shadow-lg">
+    <div className="min-h-screen flex items-center justify-center bg-background py-12 px-4 sm:px-6 lg:px-8">
+      <Card className="w-full max-w-md border border-border shadow-lg bg-card">
         <CardHeader className="space-y-4">
           <div className="flex justify-center">
             <img 
@@ -72,8 +72,8 @@ export default function LoginPage() {
             />
           </div>
           <div className="space-y-1 text-center">
-            <CardTitle className="text-2xl font-bold">Willkommen beim Vinaturel-CRM</CardTitle>
-            <CardDescription>
+            <CardTitle className="text-2xl font-bold text-primary">Willkommen beim Vinaturel-CRM</CardTitle>
+            <CardDescription className="text-muted-foreground">
               Bitte melden Sie sich mit Ihren Shopware-Zugangsdaten an
             </CardDescription>
           </div>
@@ -82,7 +82,7 @@ export default function LoginPage() {
           <form onSubmit={form.handleSubmit(onSubmit)}>
             <CardContent className="space-y-4">
               {(authError || loginError) && (
-                <div className="text-sm text-red-500 text-center p-3 bg-red-50 rounded-md">
+                <div className="text-sm text-destructive text-center p-3 bg-destructive/10 rounded-md">
                   {authError || loginError}
                 </div>
               )}
@@ -132,7 +132,7 @@ export default function LoginPage() {
             <CardFooter className="flex flex-col space-y-4">
               <Button 
                 type="submit" 
-                className="w-full bg-primary hover:bg-primary/90" 
+                className="w-full bg-primary hover:bg-primary/90 text-primary-foreground" 
                 disabled={isSubmitting || authLoading}
               >
                 {isSubmitting || authLoading ? (
@@ -149,7 +149,7 @@ export default function LoginPage() {
                 <p>Haben Sie Ihr Passwort vergessen?{' '}
                   <a 
                     href="#" 
-                    className="font-medium text-primary hover:underline"
+                    className="font-medium text-accent hover:text-primary underline-offset-2 hover:underline"
                     onClick={(e) => {
                       e.preventDefault();
                       // TODO: Implement password reset flow

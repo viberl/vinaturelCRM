@@ -1,11 +1,18 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import axios from 'axios';
+import { useQueryClient } from '@tanstack/react-query';
+import api from '@/lib/api';
 
 interface User {
   id: string;
   email: string;
   name: string;
-  // Add other user fields as needed from Shopware 6
+  firstName?: string | null;
+  lastName?: string | null;
+  customerNumber?: string | null;
+  role?: string;
+  salesRepEmail?: string | null;
+  salesRepId?: string | null;
+  contextToken?: string;
 }
 
 interface AuthContextType {
@@ -22,43 +29,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+
+  const mapUser = (userData: any): User => {
+    const firstName = userData.firstName ?? null;
+    const lastName = userData.lastName ?? null;
+    const name = `${firstName ?? ''} ${lastName ?? ''}`.trim() || userData.name || userData.email;
+
+    return {
+      id: userData.id,
+      email: userData.email,
+      name,
+      firstName,
+      lastName,
+      customerNumber: userData.customerNumber ?? null,
+      role: userData.role ?? 'user',
+      salesRepEmail: userData.salesRepEmail ?? null,
+      salesRepId: userData.salesRepId ?? null,
+      contextToken: userData.contextToken
+    };
+  };
+
+  const clearSession = () => {
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('jwtToken');
+    setUser(null);
+    queryClient.clear();
+  };
 
   const checkAuth = async () => {
-    const token = localStorage.getItem('authToken');
-    if (!token) {
+    const jwtToken = typeof window !== 'undefined' ? localStorage.getItem('jwtToken') : null;
+    if (!jwtToken) {
       setUser(null);
       setLoading(false);
       return;
     }
 
     try {
-      // Set the token in the headers
-      axios.defaults.headers.common['sw-context-token'] = token;
-      
-      // Try to fetch customer data
-      const me = await axios.get('/store-api/account/customer', {
-        baseURL: import.meta.env.VITE_API_URL,
-        headers: {
-          'Content-Type': 'application/json',
-          'sw-access-key': import.meta.env.VITE_SHOPWARE_ACCESS_KEY,
-          'sw-context-token': token,
-          'sw-language-id': '2fbb5fe2e29a4d70aa5854ce7ce3e20b'
-        },
-        withCredentials: false
-      });
-      
-      // If we got here, the token is valid and we have customer data
-      setUser({
-        id: me.data.id,
-        email: me.data.email,
-        name: `${me.data.firstName ?? ''} ${me.data.lastName ?? ''}`.trim()
-      });
+      const response = await api.get('/api/auth/me');
+      if (response.data?.success && response.data?.user) {
+        const mappedUser = mapUser(response.data.user);
+        setUser(mappedUser);
+      } else {
+        clearSession();
+      }
     } catch (err) {
       console.error('Auth check failed:', err);
-      // Clear invalid token
-      localStorage.removeItem('authToken');
-      delete axios.defaults.headers.common['sw-context-token'];
-      setUser(null);
+      clearSession();
     } finally {
       setLoading(false);
     }
@@ -72,113 +89,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     setError(null);
 
-    // Clear any existing tokens
-    delete axios.defaults.headers.common['sw-context-token'];
-    localStorage.removeItem('authToken');
+    clearSession();
 
     try {
-      // Step 1: Create a guest session first
-      const guestResponse = await axios.post(
-        '/store-api/checkout/cart',
-        {},
-        {
-          baseURL: import.meta.env.VITE_API_URL,
-          headers: {
-            'Content-Type': 'application/json',
-            'sw-access-key': import.meta.env.VITE_SHOPWARE_ACCESS_KEY
-          },
-          withCredentials: false
-        }
-      );
+      const response = await api.post('/api/login', { email, password });
 
-      const guestToken = guestResponse.headers['sw-context-token'] || 
-                      guestResponse.headers['sw-context-token'.toLowerCase()] ||
-                      guestResponse.data?.token;
-
-      if (!guestToken) {
-        throw new Error('Could not create guest session');
+      if (!response.data?.success || !response.data?.token || !response.data?.user) {
+        throw new Error(response.data?.message || 'Login fehlgeschlagen');
       }
 
-      // Step 2: Login with the guest token
-      const loginResponse = await axios.post(
-        '/store-api/account/login',
-        { 
-          email, 
-          password,
-          include: ['customer', 'contextToken']
-        },
-        {
-          baseURL: import.meta.env.VITE_API_URL,
-          headers: {
-            'Content-Type': 'application/json',
-            'sw-access-key': import.meta.env.VITE_SHOPWARE_ACCESS_KEY,
-            'sw-context-token': guestToken,
-            'sw-language-id': '2fbb5fe2e29a4d70aa5854ce7ce3e20b' // German
-          },
-          withCredentials: false
-        }
-      );
+      const { token, user: userData } = response.data;
 
-      // Get context token from response
-      const contextToken = loginResponse.headers['sw-context-token'] || 
-                         loginResponse.headers['sw-context-token'.toLowerCase()] ||
-                         loginResponse.data?.contextToken;
-
-      if (!contextToken) {
-        throw new Error('No context token received from Shopware');
+      if (userData.contextToken) {
+        localStorage.setItem('authToken', userData.contextToken);
       }
+      localStorage.setItem('jwtToken', token);
 
-      // Store the new token
-      localStorage.setItem('authToken', contextToken);
-      axios.defaults.headers.common['sw-context-token'] = contextToken;
-      // Check if customer data is included in the login response
-      if (loginResponse.data?.customer) {
-        const customer = loginResponse.data.customer;
-        setUser({
-          id: customer.id,
-          email: customer.email,
-          name: `${customer.firstName ?? ''} ${customer.lastName ?? ''}`.trim()
-        });
-        setLoading(false);
-        return;
-      }
-
-      // If no customer data in login response, try to fetch it separately
-      try {
-        const me = await axios.get('/store-api/account/customer', {
-          baseURL: import.meta.env.VITE_API_URL,
-          headers: {
-            'Content-Type': 'application/json',
-            'sw-access-key': import.meta.env.VITE_SHOPWARE_ACCESS_KEY,
-            'sw-context-token': contextToken,
-            'sw-language-id': '2fbb5fe2e29a4d70aa5854ce7ce3e20b'
-          },
-          withCredentials: false
-        });
-        
-        setUser({
-          id: me.data.id,
-          email: me.data.email,
-          name: `${me.data.firstName ?? ''} ${me.data.lastName ?? ''}`.trim()
-        });
-      } catch (error) {
-        console.error('Failed to fetch customer data:', error);
-        // If we can't fetch customer data, still consider the login successful
-        // but with limited user data
-        setUser({
-          id: 'unknown',
-          email: email,
-          name: email
-        });
-      }
-
-
+      const mappedUser = mapUser(userData);
+      setUser(mappedUser);
+      await queryClient.invalidateQueries({ queryKey: ['/admin-api/search/customer'] });
+      await queryClient.invalidateQueries({ queryKey: ['/admin-api/customer'] });
     } catch (err: any) {
       console.error('Login error:', err);
       setError(
         err.response?.data?.message ??
           'Login fehlgeschlagen. Bitte Anmeldedaten prüfen.'
       );
+      clearSession();
       throw err;
     } finally {
       setLoading(false);
@@ -186,31 +123,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
-    const token = localStorage.getItem('authToken');
-    
     try {
-      // Try to logout on the server if we have a token
-      if (token) {
-        await axios.post('/store-api/account/logout', {}, {
-          baseURL: import.meta.env.VITE_API_URL,
-          headers: {
-            'Content-Type': 'application/json',
-            'sw-access-key': import.meta.env.VITE_SHOPWARE_ACCESS_KEY,
-            'sw-context-token': token,
-            'sw-language-id': '2fbb5fe2e29a4d70aa5854ce7ce3e20b'
-          },
-          withCredentials: false
-        });
-      }
+      await api.post('/api/logout');
     } catch (err) {
       console.error('Logout error:', err);
-      // Continue with local cleanup even if server logout fails
     } finally {
-      // Clean up local data
-      localStorage.removeItem('authToken');
-      delete axios.defaults.headers.common['sw-context-token'];
-      setUser(null);
+      clearSession();
       setError(null);
+      queryClient.removeQueries();
     }
   };
 
