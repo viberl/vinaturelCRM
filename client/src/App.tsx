@@ -10,6 +10,11 @@ import CustomersPage from "@/pages/CustomersPage";
 import TasksPage from "@/pages/TasksPage";
 import CustomerDetail from "@/pages/CustomerDetail";
 import CustomerInteractionCategory from "@/pages/CustomerInteractionCategory";
+import SortimentPage from "@/pages/SortimentPage";
+import SortimentDetailPage from "@/pages/SortimentDetailPage";
+import SortimentLintherListePage from "@/pages/SortimentLintherListePage";
+import EmployeePortalPage from "@/pages/EmployeePortalPage";
+import AuswertungenPage from "@/pages/AuswertungenPage";
 import Sidebar from "@/components/Sidebar";
 import NotFound from "@/pages/not-found";
 import LoginPage from "@/pages/auth/LoginPage";
@@ -73,8 +78,14 @@ function AppRoutes() {
                 <Route path="/dashboard" component={Dashboard} />
                 <Route path="/map" component={MapView} />
                 <Route path="/customers" component={CustomersPage} />
+                <Route path="/sortiment" component={SortimentPage} />
+                <Route path="/sortiment/linther-liste" component={SortimentLintherListePage} />
+                <Route path="/sortiment/:id" component={SortimentDetailPage} />
+                <Route path="/auswertungen" component={AuswertungenPage} />
+                <Route path="/analytics" component={AuswertungenPage} />
                 <Route path="/customer/:id" component={CustomerDetail} />
                 <Route path="/tasks" component={TasksPage} />
+                <Route path="/mitarbeiter-portal" component={EmployeePortalPage} />
                 <Route
                   path="/customer/:id/interaction/:category"
                   component={CustomerInteractionCategory}

@@ -1,5 +1,6 @@
+import React from "react";
 import { Link, useLocation } from "wouter";
-import { Map, Users, BarChart3, CheckSquare, Settings, LogOut, LayoutDashboard, X } from "lucide-react";
+import { Map, Users, BarChart3, CheckSquare, Settings, LogOut, LayoutDashboard, Wine, X, Sheet as SheetIcon, Briefcase } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
@@ -10,13 +11,23 @@ import {
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
 
-const navigation = [
+type NavigationItem = {
+  name: string;
+  href: string;
+  icon: React.ComponentType<any>;
+  isChild?: boolean;
+};
+
+const navigation: NavigationItem[] = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { name: "Kunden-Karte", href: "/map", icon: Map },
   { name: "Kundenliste", href: "/customers", icon: Users },
-  { name: "Analytics", href: "/analytics", icon: BarChart3 },
+  { name: "Sortiment", href: "/sortiment", icon: Wine },
+  { name: "Linther Liste", href: "/sortiment/linther-liste", icon: SheetIcon, isChild: true },
+  { name: "Auswertungen", href: "/auswertungen", icon: BarChart3 },
   { name: "Aufgaben", href: "/tasks", icon: CheckSquare },
   { name: "Einstellungen", href: "/settings", icon: Settings },
+  { name: "Mitarbeiter-Portal", href: "/mitarbeiter-portal", icon: Briefcase },
 ];
 interface SidebarProps {
   isOpen: boolean;
@@ -100,11 +111,12 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                 variant="ghost"
                 className={cn(
                   "w-full justify-start text-foreground hover:bg-muted hover:text-foreground",
-                  isActive && "bg-primary/10 text-primary border-r-2 border-primary"
+                  isActive && "bg-primary/10 text-primary border-r-2 border-primary",
+                  item.isChild && "pl-10 text-sm"
                 )}
-                onClick={handleItemClick}
-              >
-                <Icon className="mr-3 h-5 w-5" />
+              onClick={handleItemClick}
+            >
+              <Icon className="mr-3 h-5 w-5" />
                 {item.name}
               </Button>
             </Link>

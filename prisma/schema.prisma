@@ -24,6 +24,7 @@ model SalesRep {
 
 model Customer {
   id         String   @id
+  shopwareCustomerId String? @unique @map("shopware_customer_id")
   email      String
   company    String?
   firstName  String?

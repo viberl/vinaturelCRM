@@ -6,7 +6,13 @@ const AZURE_CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET;
 const AZURE_TENANT_ID = process.env.AZURE_TENANT_ID;
 const AZURE_REDIRECT_URI = process.env.AZURE_REDIRECT_URI || `${process.env.CLIENT_URL ?? 'http://localhost:3000'}/auth/microsoft/callback`;
 
-const GRAPH_SCOPES = ['offline_access', 'User.Read', 'Calendars.Read'];
+const GRAPH_SCOPES = [
+  'offline_access',
+  'User.Read',
+  'Calendars.Read',
+  'Files.ReadWrite.All',
+  'Sites.Read.All'
+];
 const AUTHORITY = AZURE_TENANT_ID ? `https://login.microsoftonline.com/${AZURE_TENANT_ID}` : null;
 
 if (process.env.NODE_ENV !== 'production') {

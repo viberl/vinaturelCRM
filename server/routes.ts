@@ -1,3 +1,4 @@
+import "./env";
 import { Express, Request, Response, NextFunction, json } from "express";
 import { createServer, Server as HttpServer } from "http";
 import { Server as SocketIOServer, Socket, DefaultEventsMap } from "socket.io";
@@ -5,6 +6,22 @@ import type { Server as SocketIOServerType } from 'socket.io';
 import cors from "cors";
 import dotenv from "dotenv";
 import { randomUUID } from "crypto";
+import {
+  addYears,
+  eachMonthOfInterval,
+  endOfDay,
+  endOfMonth,
+  endOfQuarter,
+  format,
+  parseISO,
+  startOfDay,
+  startOfMonth,
+  startOfQuarter,
+  subMilliseconds,
+  subMonths,
+  subYears,
+} from "date-fns";
+import { de } from "date-fns/locale";
 import prisma from "./prismaClient";
 import { adminSearch } from "./shopwareAdmin";
 import {
@@ -34,6 +51,22 @@ import type {
 } from "@shared/types/task";
 import type { CustomerOrderSummary, CustomerOrderItem } from "@shared/types/order";
 import type { DashboardOrderSummary, DashboardData, DashboardStats } from "@shared/types/dashboard";
+import type {
+  AnalyticsSummaryResponse,
+  AnalyticsPeriodType,
+  AnalyticsCustomerGroup,
+  AnalyticsTrendPoint,
+} from "@shared/types/analytics";
+import type { LintherListeResponse, LintherListeRow } from "@shared/types/linther-liste";
+import { getLintherListe, addLintherListeRow, GraphApiError } from "./services/lintherListeService";
+import type {
+  CatalogListResponse,
+  CatalogSummaryItem,
+  CatalogDetailResponse,
+  CatalogDetailItem,
+  CatalogPriceTier,
+  CatalogTopCustomer,
+} from "@shared/types/catalog";
 import { auth, AuthRequest, generateToken } from "./auth";
 import jwt from 'jsonwebtoken';
 import { geocodeAddress } from "./geocoding";
@@ -1138,6 +1171,353 @@ function mapLineItemDetails(
   return details;
 }
 
+type PropertyMap = Map<string, Set<string>>;
+
+function collectProductPropertyValues(product: Record<string, any>): PropertyMap {
+  const values: PropertyMap = new Map();
+
+  const addValue = (key: string | null, value: string | null) => {
+    if (!key || !value) return;
+    const normalisedKey = key.trim().toLowerCase();
+    if (!normalisedKey) return;
+    const bucket = values.get(normalisedKey) ?? new Set<string>();
+    bucket.add(value);
+    values.set(normalisedKey, bucket);
+  };
+
+  const properties = Array.isArray(product?.properties) ? product.properties : [];
+  for (const property of properties) {
+    const groupCustomField = toStringOrNull(property?.group?.customFields?.vinaturel_property_config_technical_name);
+    const groupName = toStringOrNull(property?.group?.name);
+    const optionName = toStringOrNull(property?.translated?.name ?? property?.name);
+    addValue(groupCustomField ?? groupName, optionName);
+  }
+
+  const productExtensions = product?.extensions?.vinaturelProductProperties;
+  if (productExtensions && typeof productExtensions === 'object') {
+    for (const [key, entries] of Object.entries(productExtensions as Record<string, unknown>)) {
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object') continue;
+        const name = toStringOrNull((entry as Record<string, unknown>).name);
+        addValue(key, name);
+      }
+    }
+  }
+
+  return values;
+}
+
+function readPropertyValues(map: PropertyMap, keys: string[]): string[] {
+  const collected: string[] = [];
+  for (const key of keys) {
+    const bucket = map.get(key.toLowerCase());
+    if (!bucket) continue;
+    bucket.forEach((value) => {
+      if (!collected.includes(value)) {
+        collected.push(value);
+      }
+    });
+  }
+  return collected;
+}
+
+function readFirstPropertyValue(map: PropertyMap, keys: string[]): string | null {
+  const values = readPropertyValues(map, keys);
+  return values.length > 0 ? values[0] : null;
+}
+
+function buildPriceTiersFromProduct(product: Record<string, any>): CatalogPriceTier[] {
+  const customFields = (product?.customFields && typeof product.customFields === 'object')
+    ? (product.customFields as Record<string, unknown>)
+    : {};
+
+  const tiers: CatalogPriceTier[] = [];
+  const seen = new Set<string>();
+
+  const appendTier = (tier: string, value: number | null) => {
+    const normalised = tier.trim().toUpperCase();
+    if (!normalised || seen.has(normalised)) return;
+    seen.add(normalised);
+    tiers.push({
+      tier: normalised,
+      label: normalised,
+      value,
+      currency: 'EUR',
+    });
+  };
+
+  const vk1Candidate = toNumber(customFields?.vinaturel_tier_pricing_vk_net_price_1)
+    ?? toNumber(product?.price?.[0]?.gross)
+    ?? toNumber(product?.price?.[0]?.net);
+  appendTier('VK1', vk1Candidate);
+
+  for (let i = 2; i <= 10; i += 1) {
+    const key = `vinaturel_tier_pricing_vk_net_price_${i}`;
+    const value = toNumber(customFields?.[key]);
+    if (value != null && value !== 0) {
+      appendTier(`VK${i}`, value);
+    }
+  }
+
+  if (tiers.length === 0) {
+    const fallbackPrice = toNumber(product?.price?.[0]?.gross);
+    appendTier('VK1', fallbackPrice);
+  }
+
+  return tiers;
+}
+
+function extractAllocationInfo(product: Record<string, any>) {
+  const customFields = (product?.customFields && typeof product.customFields === 'object')
+    ? (product.customFields as Record<string, unknown>)
+    : {};
+
+  const quantity = toNumber(
+    customFields?.vinaturel_product_allocation_reserved_quantity
+      ?? customFields?.vinaturel_allocation_reserved_quantity
+      ?? customFields?.vinaturel_allocation_quantity
+  );
+  if (!quantity || quantity <= 0) {
+    return null;
+  }
+
+  const note = toStringOrNull(
+    customFields?.vinaturel_product_allocation_note
+      ?? customFields?.vinaturel_allocation_note
+  );
+
+  return {
+    quantity: Math.round(quantity),
+    note,
+  };
+}
+
+function mapProductToCatalogSummary(product: Record<string, any>): CatalogSummaryItem {
+  const propertyMap = collectProductPropertyValues(product);
+
+  const grapes = readPropertyValues(propertyMap, ['grapes', 'rebsorten']);
+  const certifications = readPropertyValues(propertyMap, ['certification', 'bio', 'demeter']);
+  const country = readFirstPropertyValue(propertyMap, ['country', 'land']);
+  const region = readFirstPropertyValue(propertyMap, ['region']);
+  let vintage = readFirstPropertyValue(propertyMap, ['year', 'jahrgang', 'vintage']);
+  let volume = readFirstPropertyValue(propertyMap, ['volume', 'volumen', 'füllmenge']);
+
+  const translatedCustomFields = product?.translated?.customFields && typeof product.translated.customFields === 'object'
+    ? (product.translated.customFields as Record<string, any>)
+    : null;
+  const customFields = (product?.customFields && typeof product.customFields === 'object')
+    ? (product.customFields as Record<string, any>)
+    : null;
+
+  const customFieldSources = [customFields, translatedCustomFields];
+
+  if (!vintage) {
+    vintage = pickCustomFieldValue(customFieldSources, [
+      'vinaturel_product_vintage',
+      'vinaturel_wine_vintage',
+      'vinaturel_wine_year',
+      'vinaturel_default_vintage',
+      'vintage',
+      'jahrgang',
+    ]);
+  }
+
+  if (!volume) {
+    volume = pickCustomFieldValue(customFieldSources, [
+      'vinaturel_product_volume',
+      'vinaturel_product_volume_in_ml',
+      'vinaturel_product_volume_ml',
+      'vinaturel_product_volume_litre',
+      'vinaturel_wine_volume',
+      'volume',
+      'inhalt',
+      'content',
+      'vinaturel_default_volume',
+    ]);
+  }
+
+  volume = normaliseVolumeValue(volume);
+
+  // Manufacturer fallback chain
+  const manufacturerName =
+    toStringOrNull(product?.manufacturer?.name)
+    ?? toStringOrNull(product?.translated?.manufacturer?.name)
+    ?? pickCustomFieldValue(customFieldSources, [
+      'vinaturel_winery_name',
+      'vinaturel_winery',
+      'vinaturel_wine_estate',
+      'vinaturel_producer',
+    ])
+    ?? toStringOrNull(product?.customFields?.winery)
+    ?? null;
+
+  const priceTiers = buildPriceTiersFromProduct(product);
+  const allocation = extractAllocationInfo(product);
+
+  const image = toStringOrNull(product?.cover?.media?.url)
+    ?? toStringOrNull(product?.media?.[0]?.media?.url)
+    ?? null;
+
+  const summary: CatalogSummaryItem = {
+    id: toStringOrNull(product?.id) ?? randomUUID(),
+    articleNumber: toStringOrNull(product?.productNumber),
+    winery: manufacturerName,
+    wineName: toStringOrNull(product?.translated?.name ?? product?.name),
+    vintage,
+    volume,
+    stock: toNumber(product?.stock),
+    availableStock: toNumber(product?.availableStock),
+    country,
+    region,
+    grapes,
+    certifications,
+    prices: priceTiers,
+    image,
+    allocation,
+  };
+
+  return summary;
+}
+
+function mapProductToCatalogDetail(
+  product: Record<string, any>,
+  topCustomers: CatalogTopCustomer[],
+): CatalogDetailItem {
+  const summary = mapProductToCatalogSummary(product);
+
+  const customFields = (product?.customFields && typeof product.customFields === 'object')
+    ? (product.customFields as Record<string, any>)
+    : null;
+  const translatedDescription = toStringOrNull(product?.translated?.description ?? product?.description);
+  const tastingNotes = toStringOrNull(customFields?.vinaturel_tasting_notes_text ?? customFields?.vinaturel_product_description);
+
+  const detail: CatalogDetailItem = {
+    ...summary,
+    description: tastingNotes ?? translatedDescription,
+    stockHistory: [],
+    topCustomers,
+  };
+
+  return detail;
+}
+
+async function fetchTopCustomersForProduct(productId: string): Promise<CatalogTopCustomer[]> {
+  if (!productId) {
+    return [];
+  }
+
+  const payload = {
+    filter: [
+      {
+        type: 'equals',
+        field: 'productId',
+        value: productId,
+      },
+      {
+        type: 'equals',
+        field: 'type',
+        value: 'product',
+      },
+    ],
+    limit: 50,
+    sort: [
+      {
+        field: 'order.orderDateTime',
+        order: 'DESC' as const,
+      },
+    ],
+    associations: {
+      order: {
+        associations: {
+          orderCustomer: {},
+        },
+      },
+    },
+  };
+
+  try {
+    const response = await adminSearch<any>('/search/order-line-item', payload);
+    const entries = response?.data ?? [];
+    const grouped = new Map<string, {
+      id: string;
+      name: string;
+      lastOrdered: number;
+      quantity: number;
+      priceTier: string | null;
+    }>();
+
+    for (const entry of entries) {
+      const parsed = parseOrderLineItem(entry);
+      const order = entry?.order;
+      const orderCustomer = order?.orderCustomer;
+      const customerId = toStringOrNull(orderCustomer?.customerId)
+        ?? toStringOrNull(orderCustomer?.email)
+        ?? toStringOrNull(orderCustomer?.company)
+        ?? toStringOrNull(order?.id)
+        ?? randomUUID();
+
+      const company = toStringOrNull(orderCustomer?.company);
+      const personName = [
+        toStringOrNull(orderCustomer?.firstName),
+        toStringOrNull(orderCustomer?.lastName),
+      ].filter(Boolean).join(' ');
+      const displayName = company || personName || toStringOrNull(orderCustomer?.email) || `Kunde ${customerId.slice(0, 6)}`;
+
+      const orderDate = toStringOrNull(order?.orderDateTime);
+      const timestamp = orderDate ? Date.parse(orderDate) : Date.now();
+
+      let priceTier: string | null = null;
+      const payloadData = parsed.payload ?? null;
+      if (payloadData && typeof payloadData === 'object') {
+        priceTier = toStringOrNull(
+          payloadData.priceGroup
+          ?? payloadData.rule?.name
+          ?? payloadData.ruleName
+          ?? payloadData.priceGroupName
+          ?? payloadData.priceGroupLabel
+        );
+
+        if (!priceTier && payloadData.customFields && typeof payloadData.customFields === 'object') {
+          priceTier = toStringOrNull((payloadData.customFields as Record<string, unknown>).vinaturel_tier_pricing_customer_default_price_group);
+        }
+      }
+
+      const existing = grouped.get(customerId);
+      const quantity = parsed.quantity ?? 0;
+
+      if (!existing || timestamp > existing.lastOrdered) {
+        grouped.set(customerId, {
+          id: customerId,
+          name: displayName,
+          lastOrdered: timestamp,
+          quantity,
+          priceTier,
+        });
+      } else {
+        existing.quantity += quantity;
+      }
+    }
+
+    return Array.from(grouped.values())
+      .sort((a, b) => b.lastOrdered - a.lastOrdered)
+      .slice(0, 5)
+      .map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        lastOrdered: new Intl.DateTimeFormat('de-DE').format(new Date(entry.lastOrdered)),
+        quantity: Math.round(entry.quantity),
+        priceTier: entry.priceTier,
+      }));
+  } catch (error) {
+    console.warn('Failed to fetch top customers for product', {
+      productId,
+      error: error instanceof Error ? error.message : error,
+    });
+    return [];
+  }
+}
+
 function toNumber(value: unknown): number | null {
   if (value === undefined || value === null) {
     return null;
@@ -1180,6 +1560,733 @@ function extractQueryParam(value: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+type DateRangeInclusive = {
+  from: Date;
+  to: Date;
+};
+
+const ANALYTICS_CUSTOMER_GROUPS: AnalyticsCustomerGroup[] = ['all', 'gastro', 'fachhandel', 'endkunden'];
+
+function resolveAnalyticsPeriod(value: string | undefined): AnalyticsPeriodType {
+  if (!value) {
+    return 'month';
+  }
+
+  const normalized = value.toLowerCase();
+  if (normalized === 'quarter' || normalized === 'year' || normalized === 'custom' || normalized === 'month') {
+    return normalized as AnalyticsPeriodType;
+  }
+
+  return 'month';
+}
+
+function resolveAnalyticsCustomerGroup(value: string | undefined): AnalyticsCustomerGroup {
+  if (!value) {
+    return 'all';
+  }
+
+  const normalized = value.toLowerCase();
+  if ((ANALYTICS_CUSTOMER_GROUPS as readonly string[]).includes(normalized)) {
+    return normalized as AnalyticsCustomerGroup;
+  }
+
+  if (normalized.includes('gastro')) {
+    return 'gastro';
+  }
+
+  if (normalized.includes('fach')) {
+    return 'fachhandel';
+  }
+
+  if (normalized.includes('end')) {
+    return 'endkunden';
+  }
+
+  return 'all';
+}
+
+function normalizeCustomerGroupValue(value: string | null | undefined): AnalyticsCustomerGroup | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.includes('gastro')) {
+    return 'gastro';
+  }
+
+  if (normalized.includes('fach')) {
+    return 'fachhandel';
+  }
+
+  if (normalized.includes('end')) {
+    return 'endkunden';
+  }
+
+  return null;
+}
+
+function matchesAnalyticsCustomerGroup(customer: CustomerWithRelations, group: AnalyticsCustomerGroup): boolean {
+  if (group === 'all') {
+    return true;
+  }
+
+  const customerGroup = normalizeCustomerGroupValue(customer.customerGroup);
+  return customerGroup === group;
+}
+
+function parseDateParam(value: string | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = parseISO(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  } catch (error) {
+    return null;
+  }
+}
+
+function ensureRangeOrder(range: DateRangeInclusive): DateRangeInclusive {
+  if (range.from <= range.to) {
+    return range;
+  }
+
+  return {
+    from: range.to,
+    to: range.from
+  } satisfies DateRangeInclusive;
+}
+
+function getFiscalYearRange(reference: Date): DateRangeInclusive {
+  const year = reference.getMonth() >= 6 ? reference.getFullYear() : reference.getFullYear() - 1;
+  const start = startOfDay(new Date(year, 6, 1));
+  const end = endOfDay(subMilliseconds(new Date(year + 1, 6, 1), 1));
+
+  return { from: start, to: end } satisfies DateRangeInclusive;
+}
+
+type OrderAggregateEntry = {
+  id: string;
+  customerId: string | null;
+  shopwareCustomerId?: string | null;
+  amount: number;
+  orderDate: Date | null;
+  currency: string | null;
+  customerName: string | null;
+  customerCompany: string | null;
+  customerNumber: string | null;
+  customerEmail: string | null;
+  customerFirstName: string | null;
+  customerLastName: string | null;
+  orderNumber: string | null;
+};
+
+type CustomerIdentifier = {
+  id: string;
+  shopwareId?: string | null;
+  customerNumber?: string | null;
+  email?: string | null;
+  displayName?: string | null;
+  company?: string | null;
+};
+
+type CustomerIndexBundle = {
+  customerIndex?: Map<string, CustomerIdentifier>;
+  shopwareIndex?: Map<string, string>;
+  numberIndex?: Map<string, string>;
+  emailIndex?: Map<string, string>;
+};
+
+type UnmatchedOrderDebug = {
+  id: string | null;
+  shopwareId?: string | null;
+  number: string | null;
+  email: string | null;
+  orderId: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  company: string | null;
+};
+
+async function fetchOrderCustomerDetailsBatch(orderIds: string[]): Promise<Map<string, {
+  customerId: string | null;
+  customerNumber: string | null;
+  email: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  company: string | null;
+}>> {
+  const unique = Array.from(new Set(orderIds.filter((value): value is string => Boolean(value))));
+  const results = new Map<string, {
+    customerId: string | null;
+    customerNumber: string | null;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    company: string | null;
+  }>();
+
+  if (unique.length === 0) {
+    return results;
+  }
+
+  const chunkSize = 25;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    if (chunk.length === 0) continue;
+
+    const payload = {
+      filter: [
+        {
+          type: 'equalsAny',
+          field: 'orderId',
+          value: chunk.join('|')
+        }
+      ],
+      limit: chunk.length,
+      includes: {
+        order_customer: ['id', 'orderId', 'customerId', 'firstName', 'lastName', 'company', 'customerNumber', 'email'],
+        customer: ['id', 'firstName', 'lastName', 'company', 'email', 'customerNumber'],
+        order: ['id']
+      },
+      associations: {
+        customer: {},
+        order: {}
+      }
+    };
+
+    try {
+      const response = await adminSearch<any>('/search/order-customer', payload);
+      const data = Array.isArray(response?.data) ? response.data : [];
+      for (const item of data) {
+        const orderCustomer = item?.orderCustomer ?? item?.order_customer ?? item;
+        const customer = orderCustomer?.customer ?? item?.customer ?? {};
+        const relatedOrder = orderCustomer?.order ?? item?.order ?? {};
+
+        const orderId =
+          toStringOrNull(orderCustomer?.orderId) ||
+          toStringOrNull(relatedOrder?.id) ||
+          null;
+
+        if (!orderId) {
+          continue;
+        }
+
+        results.set(orderId, {
+          customerId:
+            toStringOrNull(orderCustomer?.customerId) ||
+            toStringOrNull(customer?.id) ||
+            null,
+          customerNumber:
+            toStringOrNull(orderCustomer?.customerNumber) ||
+            toStringOrNull(customer?.customerNumber) ||
+            null,
+          email:
+            toStringOrNull(orderCustomer?.email)?.toLowerCase() ||
+            toStringOrNull(customer?.email)?.toLowerCase() ||
+            null,
+          firstName:
+            toStringOrNull(orderCustomer?.firstName) ||
+            toStringOrNull(customer?.firstName) ||
+            null,
+          lastName:
+            toStringOrNull(orderCustomer?.lastName) ||
+            toStringOrNull(customer?.lastName) ||
+            null,
+          company:
+            toStringOrNull(orderCustomer?.company) ||
+            toStringOrNull(customer?.company) ||
+            null
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to fetch batched order customer details', {
+        chunkSize: chunk.length,
+        error: error instanceof Error ? error.message : error
+      });
+    }
+  }
+
+  return results;
+}
+
+async function fetchOrdersWithinRange(
+  customerIds: string[],
+  range: DateRangeInclusive,
+  indexes?: CustomerIndexBundle
+): Promise<{
+  orders: OrderAggregateEntry[];
+  currency: string | null;
+  unmatched: UnmatchedOrderDebug[];
+}> {
+  if (!Array.isArray(customerIds) || customerIds.length === 0) {
+    return { orders: [], currency: null, unmatched: [] };
+  }
+
+  const chunkSize = 25;
+  const limit = 200;
+  const seenOrderIds = new Set<string>();
+  const orders: OrderAggregateEntry[] = [];
+  let detectedCurrency: string | null = null;
+  const unmatched: UnmatchedOrderDebug[] = [];
+  const detailTargets: Array<{
+    orderId: string;
+    entry: OrderAggregateEntry;
+    directCustomerId: string | null;
+    unmatchedRef: UnmatchedOrderDebug | null;
+  }> = [];
+
+  const customerIndex = indexes?.customerIndex ?? new Map<string, CustomerIdentifier>();
+  const shopwareIndex = indexes?.shopwareIndex ?? new Map<string, string>();
+  const numberIndex = indexes?.numberIndex ?? new Map<string, string>();
+  const emailIndex = indexes?.emailIndex ?? new Map<string, string>();
+
+  for (let i = 0; i < customerIds.length; i += chunkSize) {
+    const chunk = customerIds.slice(i, i + chunkSize);
+    if (chunk.length === 0) continue;
+
+    const chunkNumbers = new Set<string>();
+    const chunkEmails = new Set<string>();
+    const chunkCrmIds = new Set<string>();
+
+    for (const id of chunk) {
+      const crmId = shopwareIndex.get(id) ?? id;
+      chunkCrmIds.add(crmId);
+
+      const meta = customerIndex.get(crmId);
+      if (meta?.customerNumber) chunkNumbers.add(meta.customerNumber);
+      if (meta?.email) chunkEmails.add(meta.email);
+    }
+
+    numberIndex.forEach((mappedId, number) => {
+      if (chunkCrmIds.has(mappedId)) {
+        chunkNumbers.add(number);
+      }
+    });
+
+    emailIndex.forEach((mappedId, mail) => {
+      if (chunkCrmIds.has(mappedId)) {
+        chunkEmails.add(mail);
+      }
+    });
+
+    let page = 1;
+
+    while (true) {
+      const queries: Array<Record<string, any>> = [];
+      queries.push({
+        type: 'equalsAny',
+        field: 'orderCustomer.customerId',
+        value: chunk.join('|')
+      });
+
+      if (chunkNumbers.size > 0) {
+        queries.push({
+          type: 'equalsAny',
+          field: 'orderCustomer.customerNumber',
+          value: Array.from(chunkNumbers).join('|')
+        });
+      }
+
+      if (chunkEmails.size > 0) {
+        queries.push({
+          type: 'equalsAny',
+          field: 'orderCustomer.email',
+          value: Array.from(chunkEmails).join('|')
+        });
+      }
+
+      const payload: Record<string, any> = {
+        filter: [
+          queries.length === 1
+            ? queries[0]
+            : {
+                type: 'multi',
+                operator: 'or',
+                queries
+              },
+          {
+            type: 'range',
+            field: 'orderDateTime',
+            parameters: {
+              gte: range.from.toISOString(),
+              lte: range.to.toISOString()
+            }
+          }
+        ],
+        sort: [
+          {
+            field: 'orderDateTime',
+            order: 'DESC'
+          }
+        ],
+        limit,
+        page,
+        associations: {
+          currency: {},
+          orderCustomer: {
+            associations: {
+              customer: {}
+            }
+          }
+        },
+        includes: {
+          order: ['id', 'orderNumber', 'orderDateTime', 'createdAt', 'amountTotal', 'price', 'orderCustomerId'],
+          currency: ['id', 'isoCode', 'shortName', 'symbol'],
+          order_customer: ['id', 'customerId', 'firstName', 'lastName', 'company', 'customerNumber', 'email'],
+          customer: ['id', 'firstName', 'lastName', 'company', 'email', 'customerNumber']
+        },
+        'total-count-mode': 1
+      };
+
+      let response: any;
+      try {
+        response = await adminSearch<any>('/search/order', payload);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const responseData = (error as any)?.response?.data;
+        console.warn('Analytics order fetch failed for chunk', {
+          chunkSize: chunk.length,
+          message,
+          response: responseData ?? null,
+        });
+        break;
+      }
+
+      const data = Array.isArray(response?.data) ? response.data : [];
+      if (data.length === 0) {
+        break;
+      }
+
+      const rawOrders = data
+        .map((entry: any) => entry?.order ?? entry)
+        .filter((order: any): order is Record<string, any> => Boolean(order));
+
+      await hydrateOrdersWithCustomers(rawOrders);
+
+      for (const order of rawOrders) {
+        const orderId = toStringOrNull(order?.id);
+        if (orderId && seenOrderIds.has(orderId)) {
+          continue;
+        }
+
+        const orderDateString =
+          toStringOrNull(order?.orderDateTime) ||
+          toStringOrNull(order?.createdAt);
+        const orderDate = orderDateString ? new Date(orderDateString) : null;
+        if (orderDate && (orderDate < range.from || orderDate > range.to)) {
+          continue;
+        }
+
+        if (orderId) {
+          seenOrderIds.add(orderId);
+        }
+
+        const amount = toNumber(order?.amountTotal ?? order?.price?.totalPrice) ?? 0;
+
+        const currencyCode =
+          toStringOrNull(order?.currency?.isoCode) ||
+          toStringOrNull(order?.currency?.shortName) ||
+          toStringOrNull(order?.currency?.symbol) ||
+          null;
+        if (!detectedCurrency && currencyCode) {
+          detectedCurrency = currencyCode;
+        }
+
+        const orderCustomer = order?.orderCustomer ?? order?.order_customer ?? {};
+        const orderCustomerEntity = orderCustomer?.customer ?? {};
+        const directCustomerId =
+          toStringOrNull(orderCustomer?.customerId) ||
+          toStringOrNull(orderCustomerEntity?.id) ||
+          toStringOrNull(order?.orderCustomerId) ||
+          toStringOrNull(order?.customerId) ||
+          null;
+
+        let resolvedCustomerId = directCustomerId;
+        
+        if (resolvedCustomerId) {
+          if (!customerIndex.has(resolvedCustomerId) && shopwareIndex.has(resolvedCustomerId)) {
+            resolvedCustomerId = shopwareIndex.get(resolvedCustomerId) ?? resolvedCustomerId;
+          }
+        }
+        let customerNumber = toStringOrNull(orderCustomer?.customerNumber) || toStringOrNull(orderCustomerEntity?.customerNumber) || null;
+        let customerEmail =
+          toStringOrNull(orderCustomer?.email)?.toLowerCase() ||
+          toStringOrNull(orderCustomerEntity?.email)?.toLowerCase() ||
+          null;
+        let orderFirstName =
+          toStringOrNull(orderCustomer?.firstName) ||
+          toStringOrNull(orderCustomerEntity?.firstName) ||
+          null;
+        let orderLastName =
+          toStringOrNull(orderCustomer?.lastName) ||
+          toStringOrNull(orderCustomerEntity?.lastName) ||
+          null;
+        let orderCompany =
+          toStringOrNull(orderCustomer?.company) ||
+          toStringOrNull(orderCustomerEntity?.company) ||
+          null;
+
+        if (!resolvedCustomerId) {
+          if (customerNumber && numberIndex.has(customerNumber)) {
+            resolvedCustomerId = numberIndex.get(customerNumber) ?? null;
+          }
+
+          if (!resolvedCustomerId && customerEmail && emailIndex.has(customerEmail)) {
+            resolvedCustomerId = emailIndex.get(customerEmail) ?? null;
+          }
+
+          if (!resolvedCustomerId && directCustomerId && shopwareIndex.has(directCustomerId)) {
+            resolvedCustomerId = shopwareIndex.get(directCustomerId) ?? null;
+          }
+        }
+
+        const lookupEntry = resolvedCustomerId ? customerIndex.get(resolvedCustomerId) : undefined;
+        const nameFromIndex = lookupEntry?.company || lookupEntry?.displayName || null;
+        const name = [orderFirstName, orderLastName].filter(Boolean).join(' ').trim() || null;
+        const finalName =
+          nameFromIndex ||
+          orderCompany ||
+          name ||
+          customerNumber ||
+          customerEmail ||
+          null;
+        const finalCompany = orderCompany || lookupEntry?.company || null;
+        const orderNumber = toStringOrNull(order?.orderNumber);
+
+        const entry: OrderAggregateEntry = {
+          id: orderId ?? randomUUID(),
+          customerId: resolvedCustomerId,
+          shopwareCustomerId: directCustomerId,
+          amount,
+          orderDate,
+          currency: currencyCode,
+          customerName: finalName,
+          customerCompany: finalCompany,
+          customerNumber,
+          customerEmail,
+          customerFirstName: orderFirstName,
+          customerLastName: orderLastName,
+          orderNumber
+        };
+
+        orders.push(entry);
+
+        let unmatchedRef: UnmatchedOrderDebug | null = null;
+        if (!resolvedCustomerId) {
+          unmatchedRef = {
+            id: directCustomerId,
+            shopwareId: directCustomerId,
+            number: customerNumber,
+            email: customerEmail,
+            orderId: orderId ?? null,
+            firstName: orderFirstName,
+            lastName: orderLastName,
+            company: orderCompany
+          };
+          unmatched.push(unmatchedRef);
+        }
+
+        if (!resolvedCustomerId && orderId) {
+          detailTargets.push({
+            orderId,
+            entry,
+            directCustomerId,
+            unmatchedRef
+          });
+        }
+      }
+
+      if (data.length < limit) {
+        break;
+      }
+
+      page += 1;
+      if (page > 20) {
+        console.warn('Analytics order fetch aborted due to high page count', {
+          chunkSize: chunk.length
+        });
+        break;
+      }
+    }
+  }
+
+  if (detailTargets.length > 0) {
+    const detailMap = await fetchOrderCustomerDetailsBatch(detailTargets.map((target) => target.orderId));
+
+    for (const target of detailTargets) {
+      const detail = detailMap.get(target.orderId);
+      if (!detail) {
+        continue;
+      }
+
+      const entry = target.entry;
+
+      if (!entry.customerNumber && detail.customerNumber) {
+        entry.customerNumber = detail.customerNumber;
+      }
+
+      if (!entry.customerEmail && detail.email) {
+        entry.customerEmail = detail.email;
+      }
+
+      if (!entry.customerCompany && detail.company) {
+        entry.customerCompany = detail.company;
+      }
+
+      const detailName = [detail.firstName, detail.lastName].filter(Boolean).join(' ').trim() || null;
+      if (!entry.customerName || entry.customerName === 'Unbekannter Kunde') {
+        const displayCandidate = detail.company || detailName || detail.customerNumber || detail.email;
+        if (displayCandidate) {
+          entry.customerName = displayCandidate;
+        }
+      }
+
+      if (!entry.customerFirstName && detail.firstName) {
+        entry.customerFirstName = detail.firstName;
+      }
+      if (!entry.customerLastName && detail.lastName) {
+        entry.customerLastName = detail.lastName;
+      }
+
+      const possibleShopwareId = detail.customerId || target.directCustomerId || null;
+      if (possibleShopwareId && !entry.shopwareCustomerId) {
+        entry.shopwareCustomerId = possibleShopwareId;
+      }
+
+      let resolvedCustomerId = entry.customerId;
+
+      if (!resolvedCustomerId && possibleShopwareId) {
+        resolvedCustomerId =
+          shopwareIndex.get(possibleShopwareId) ??
+          customerIndex.get(possibleShopwareId)?.id ??
+          possibleShopwareId;
+      }
+
+      if (!resolvedCustomerId && detail.customerNumber && numberIndex.has(detail.customerNumber)) {
+        resolvedCustomerId = numberIndex.get(detail.customerNumber) ?? null;
+      }
+
+      if (!resolvedCustomerId && detail.email && emailIndex.has(detail.email)) {
+        resolvedCustomerId = emailIndex.get(detail.email) ?? null;
+      }
+
+      if (resolvedCustomerId) {
+        entry.customerId = resolvedCustomerId;
+      }
+
+      if (target.unmatchedRef) {
+        if (resolvedCustomerId) {
+          const idx = unmatched.indexOf(target.unmatchedRef);
+          if (idx >= 0) {
+            unmatched.splice(idx, 1);
+          }
+        } else {
+          target.unmatchedRef.id = detail.customerId;
+          target.unmatchedRef.shopwareId = detail.customerId;
+          target.unmatchedRef.number = detail.customerNumber;
+          target.unmatchedRef.email = detail.email;
+          target.unmatchedRef.firstName = detail.firstName;
+          target.unmatchedRef.lastName = detail.lastName;
+          target.unmatchedRef.company = detail.company;
+        }
+      }
+    }
+  }
+
+  return { orders, currency: detectedCurrency, unmatched };
+}
+
+function resolveAnalyticsRanges(
+  period: AnalyticsPeriodType,
+  params: { from?: string; to?: string },
+  now: Date = new Date()
+): { current: DateRangeInclusive; previous: DateRangeInclusive } {
+  switch (period) {
+    case 'month': {
+      const start = startOfDay(startOfMonth(now));
+      const end = endOfDay(endOfMonth(now));
+      const previousStart = startOfDay(subYears(start, 1));
+      const previousEnd = endOfDay(endOfMonth(subYears(start, 1)));
+      return {
+        current: { from: start, to: end },
+        previous: { from: previousStart, to: previousEnd }
+      };
+    }
+    case 'quarter': {
+      const start = startOfDay(startOfQuarter(now));
+      const end = endOfDay(endOfQuarter(now));
+      const previousStart = startOfDay(subYears(start, 1));
+      const previousEnd = endOfDay(endOfQuarter(subYears(start, 1)));
+      return {
+        current: { from: start, to: end },
+        previous: { from: previousStart, to: previousEnd }
+      };
+    }
+    case 'year': {
+      const current = getFiscalYearRange(now);
+      const previousStart = startOfDay(addYears(current.from, -1));
+      const previousEnd = endOfDay(subMilliseconds(current.from, 1));
+      return {
+        current,
+        previous: { from: previousStart, to: previousEnd }
+      };
+    }
+    case 'custom':
+    default: {
+      const fromParam = parseDateParam(params.from);
+      const toParam = parseDateParam(params.to);
+
+      const fallbackStart = startOfDay(startOfMonth(now));
+      const fallbackEnd = endOfDay(endOfMonth(now));
+
+      const start = startOfDay(fromParam ?? fallbackStart);
+      const endReference = toParam ?? fromParam ?? fallbackEnd;
+      const end = endOfDay(endReference);
+
+      const ordered = ensureRangeOrder({ from: start, to: end });
+
+      const previousStart = startOfDay(subYears(ordered.from, 1));
+      const previousEnd = endOfDay(subYears(ordered.to, 1));
+
+      return {
+        current: ordered,
+        previous: { from: previousStart, to: previousEnd }
+      };
+    }
+  }
+}
+
+async function aggregateOrdersForAnalytics(
+  customerIds: string[],
+  range: DateRangeInclusive,
+  indexes?: CustomerIndexBundle
+): Promise<{
+  totalAmount: number;
+  orderCount: number;
+  currency: string | null;
+  orders: OrderAggregateEntry[];
+  unmatched: UnmatchedOrderDebug[];
+}> {
+  const { orders, currency, unmatched } = await fetchOrdersWithinRange(customerIds, range, indexes);
+
+  const totalAmount = orders.reduce((sum, entry) => sum + (Number.isFinite(entry.amount) ? entry.amount : 0), 0);
+
+  return {
+    totalAmount,
+    orderCount: orders.length,
+    currency,
+    orders,
+    unmatched
+  };
 }
 
 async function syncCustomersFromShopware(
@@ -1398,6 +2505,7 @@ async function syncCustomersFromShopware(
     await prisma.customer.upsert({
       where: { id: customer.id },
       update: {
+        shopwareCustomerId: customer.id,
         email: customer.email,
         company: customer.company || null,
         firstName: customer.firstName || null,
@@ -1418,6 +2526,7 @@ async function syncCustomersFromShopware(
       },
       create: {
         id: customer.id,
+        shopwareCustomerId: customer.id,
         email: customer.email,
         company: customer.company || null,
         firstName: customer.firstName || null,
@@ -2605,6 +3714,743 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     timestamp?: string;
   }
 
+  app.get(
+    '/admin-api/catalog',
+    auth,
+    async (req: AuthRequest, res: Response<CatalogListResponse | { error: string }>) => {
+    try {
+      const searchTerm = extractQueryParam(req.query.search);
+      const articleNumber = extractQueryParam(req.query.articleNumber);
+      const manufacturerId = extractQueryParam(req.query.manufacturerId);
+      const limitParam = extractQueryParam(req.query.limit);
+      const parsedLimit = Number.parseInt(limitParam ?? '150', 10);
+      const limit = Number.isFinite(parsedLimit)
+        ? Math.min(Math.max(parsedLimit, 1), 250)
+        : 150;
+
+      const filters: Array<Record<string, unknown>> = [];
+      if (articleNumber) {
+        filters.push({
+          type: 'contains',
+          field: 'productNumber',
+          value: articleNumber,
+        });
+      }
+      if (manufacturerId) {
+        filters.push({
+          type: 'equals',
+          field: 'manufacturerId',
+          value: manufacturerId,
+        });
+      }
+
+      const payload: Record<string, unknown> = {
+        limit,
+        associations: {
+          manufacturer: {},
+          properties: {
+            associations: {
+              group: {},
+            },
+          },
+          translations: {},
+          prices: {
+            associations: {
+              rule: {},
+            },
+          },
+          cover: {
+            associations: {
+              media: {},
+            },
+          },
+          media: {
+            limit: 1,
+            associations: {
+              media: {},
+            },
+          },
+        },
+        'total-count-mode': 1,
+        includes: {
+          product: [
+            'id',
+            'productNumber',
+            'stock',
+            'availableStock',
+            'manufacturerId',
+            'manufacturer',
+            'properties',
+            'customFields',
+            'price',
+            'translated',
+            'coverId',
+          ],
+          product_translation: ['name', 'description', 'customFields'],
+          product_manufacturer: ['id', 'name'],
+          property_group_option: ['id', 'name', 'customFields', 'group'],
+          property_group: ['id', 'name', 'customFields'],
+          media: ['id', 'url'],
+        },
+      };
+
+      if (filters.length > 0) {
+        payload.filter = filters;
+      }
+
+      if (searchTerm) {
+        payload.search = searchTerm;
+      }
+
+      const response = await adminSearch<any>('/search/product', payload);
+      const products: Record<string, any>[] = response?.data ?? [];
+
+      const items: CatalogSummaryItem[] = [];
+      const manufacturerMap = new Map<string, string | null>();
+      const vintageSet = new Set<string>();
+
+      for (const product of products) {
+        const productNumber = toStringOrNull(product?.productNumber);
+        if (productNumber?.toUpperCase().startsWith('VARIANTEN_')) {
+          continue;
+        }
+
+        const summary = mapProductToCatalogSummary(product);
+        items.push(summary);
+
+        const manufacturerIdentifier = toStringOrNull(product?.manufacturerId);
+        if (manufacturerIdentifier) {
+          const name = summary.winery ?? toStringOrNull(product?.manufacturer?.name) ?? null;
+          if (!manufacturerMap.has(manufacturerIdentifier)) {
+            manufacturerMap.set(manufacturerIdentifier, name);
+          }
+        }
+
+        if (summary.vintage) {
+          vintageSet.add(summary.vintage);
+        }
+      }
+
+      const facets = {
+        wineries: Array.from(manufacturerMap.entries()).map(([id, name]) => ({ id, name })),
+        vintages: Array.from(vintageSet).sort((a, b) => b.localeCompare(a, 'de')),
+      };
+
+      const payloadResponse: CatalogListResponse = {
+        items,
+        facets,
+      };
+
+      return res.json(payloadResponse);
+    } catch (error) {
+      console.error('Failed to fetch catalog', {
+        error: error instanceof Error ? error.message : error,
+      });
+      return res.status(500).json({ error: 'Sortiment konnte nicht geladen werden.' });
+    }
+  });
+
+  app.get(
+    '/admin-api/catalog/:id',
+    auth,
+    async (req: AuthRequest, res: Response<CatalogDetailResponse | { error: string }>) => {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({ error: 'Artikel-ID fehlt.' });
+    }
+
+    try {
+      const productResponse = await adminSearch<any>('/search/product', {
+        filter: [
+          {
+            type: 'equals',
+            field: 'id',
+            value: id,
+          },
+        ],
+        limit: 1,
+        associations: {
+          manufacturer: {},
+          properties: {
+            associations: {
+              group: {},
+            },
+          },
+          translations: {},
+          prices: {
+            associations: {
+              rule: {},
+            },
+          },
+          cover: {
+            associations: {
+              media: {},
+            },
+          },
+          media: {
+            limit: 1,
+            associations: {
+              media: {},
+            },
+          },
+        },
+        includes: {
+          product: [
+            'id',
+            'productNumber',
+            'stock',
+            'availableStock',
+            'manufacturerId',
+            'manufacturer',
+            'properties',
+            'customFields',
+            'price',
+            'translated',
+            'coverId',
+          ],
+          product_translation: ['name', 'description', 'customFields'],
+          product_manufacturer: ['id', 'name'],
+          property_group_option: ['id', 'name', 'customFields', 'group'],
+          property_group: ['id', 'name', 'customFields'],
+          media: ['id', 'url'],
+        },
+      });
+
+      const product = productResponse?.data?.[0];
+      if (!product) {
+        return res.status(404).json({ error: 'Artikel wurde nicht gefunden.' });
+      }
+
+      const productNumber = toStringOrNull(product?.productNumber);
+      if (productNumber?.toUpperCase().startsWith('VARIANTEN_')) {
+        return res.status(404).json({ error: 'Artikel wurde nicht gefunden.' });
+      }
+
+      const topCustomers = await fetchTopCustomersForProduct(id);
+      const detailItem = mapProductToCatalogDetail(product, topCustomers);
+
+      const detailResponse: CatalogDetailResponse = {
+        item: detailItem,
+      };
+
+      return res.json(detailResponse);
+    } catch (error) {
+      console.error('Failed to fetch catalog item', {
+        productId: id,
+        error: error instanceof Error ? error.message : error,
+      });
+      return res.status(500).json({ error: 'Artikel konnte nicht geladen werden.' });
+    }
+  });
+
+  app.get(
+    '/admin-api/linther-liste',
+    auth,
+    async (req: AuthRequest, res: Response<LintherListeResponse | { error: string }>) => {
+      if (!req.user?.id) {
+        return res.status(401).json({ error: 'Nicht autorisiert' });
+      }
+
+      try {
+        const { accessToken } = await getValidAccessToken(req.user.id);
+        const data = await getLintherListe(accessToken);
+        return res.json(data);
+      } catch (error) {
+        if (error instanceof GraphApiError) {
+          console.error('Failed to load Linther Liste', {
+            status: error.statusCode,
+            code: error.code,
+            message: error.message
+          });
+
+          if (error.isAuthError) {
+            return res.status(403).json({
+              error: 'Microsoft-Berechtigungen sind abgelaufen oder unzureichend. Bitte Microsoft-Konto erneut verbinden.'
+            });
+          }
+
+          const status = error.statusCode && error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 500;
+          return res.status(status).json({ error: 'Linther Liste konnte nicht geladen werden.' });
+        }
+
+        console.error('Failed to load Linther Liste', {
+          error: error instanceof Error ? error.message : error
+        });
+        return res.status(500).json({ error: 'Linther Liste konnte nicht geladen werden.' });
+      }
+    }
+  );
+
+  app.get('/admin-api/analytics/summary', auth, async (req: AuthRequest, res) => {
+    const timestamp = new Date().toISOString();
+    const errorId = `analytics_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    try {
+      if (!req.user?.id) {
+        return res.status(401).json({
+          success: false,
+          message: 'Nicht autorisiert',
+          code: 'UNAUTHORIZED',
+          errorId,
+          timestamp
+        });
+      }
+
+      const crmUser = await prisma.crmUser.findUnique({ where: { id: req.user.id } });
+
+      if (!crmUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'Benutzer wurde nicht gefunden',
+          code: 'USER_NOT_FOUND',
+          errorId,
+          timestamp
+        });
+      }
+
+      const normalizedEmail = crmUser.salesRepEmail?.toLowerCase() ?? null;
+
+      const period = resolveAnalyticsPeriod(extractQueryParam(req.query?.period));
+      const group = resolveAnalyticsCustomerGroup(extractQueryParam(req.query?.group));
+      const fromParam = extractQueryParam(req.query?.from);
+      const toParam = extractQueryParam(req.query?.to);
+
+      const ranges = resolveAnalyticsRanges(period, { from: fromParam, to: toParam });
+
+      const { customers: assignedCustomers, hadAssignment } = await loadAssignedCustomers(
+        {
+          id: crmUser.id,
+          email: crmUser.email,
+          salesRepEmail: crmUser.salesRepEmail,
+          salesRepId: crmUser.salesRepId
+        },
+        normalizedEmail,
+        { timestamp }
+      );
+
+      if (!hadAssignment || assignedCustomers.length === 0) {
+        const fallbackResponse: AnalyticsSummaryResponse = {
+          period: {
+            type: period,
+            current: {
+              from: ranges.current.from.toISOString(),
+              to: ranges.current.to.toISOString()
+            },
+            previous: {
+              from: ranges.previous.from.toISOString(),
+              to: ranges.previous.to.toISOString()
+            }
+          },
+          filters: {
+            group
+          },
+          totals: {
+            revenue: {
+              currency: 'EUR',
+              current: 0,
+              previous: 0
+            },
+            orders: {
+              current: 0,
+              previous: 0
+            }
+          },
+          trend: [],
+          topCustomers: [],
+          orders: [],
+          currency: 'EUR',
+          meta: {
+            assignedCustomerCount: assignedCustomers.length,
+            filteredCustomerCount: 0
+          }
+        };
+
+        return res.json(fallbackResponse);
+      }
+
+      const filteredCustomers = assignedCustomers.filter((customer) => matchesAnalyticsCustomerGroup(customer, group));
+
+      const customerIndex = new Map<string, CustomerIdentifier>();
+      const shopwareIdIndex = new Map<string, string>();
+      const customerNumberIndex = new Map<string, string>();
+      const customerEmailIndex = new Map<string, string>();
+      for (const customer of filteredCustomers) {
+        const id = toStringOrNull(customer.id);
+        if (!id) continue;
+
+        const baseName = toStringOrNull((customer as any).name ?? null);
+        const fallbackName = [
+          toStringOrNull(customer.firstName ?? null),
+          toStringOrNull(customer.lastName ?? null)
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+
+        const shopwareId = toStringOrNull((customer as any).shopwareCustomerId ?? null) ?? id;
+
+        customerIndex.set(id, {
+          id,
+          shopwareId,
+          customerNumber: toStringOrNull(customer.customerNumber),
+          email: toStringOrNull(customer.email)?.toLowerCase() ?? null,
+          displayName: baseName || (fallbackName.length > 0 ? fallbackName : null),
+          company: toStringOrNull(customer.company)
+        });
+
+        if (shopwareId && shopwareId !== id && !customerIndex.has(shopwareId)) {
+          customerIndex.set(shopwareId, {
+            id,
+            shopwareId,
+            customerNumber: toStringOrNull(customer.customerNumber),
+            email: toStringOrNull(customer.email)?.toLowerCase() ?? null,
+            displayName: baseName || (fallbackName.length > 0 ? fallbackName : null),
+            company: toStringOrNull(customer.company)
+          });
+        }
+
+        if (shopwareId && !shopwareIdIndex.has(shopwareId)) {
+          shopwareIdIndex.set(shopwareId, id);
+        }
+
+        const numberKey = toStringOrNull(customer.customerNumber);
+        if (numberKey && !customerNumberIndex.has(numberKey)) {
+          customerNumberIndex.set(numberKey, id);
+        }
+
+        const emailKey = toStringOrNull(customer.email)?.toLowerCase() ?? null;
+        if (emailKey && !customerEmailIndex.has(emailKey)) {
+          customerEmailIndex.set(emailKey, id);
+        }
+      }
+
+      const customerIds = filteredCustomers
+        .map((customer) =>
+          toStringOrNull((customer as any).shopwareCustomerId ?? null) ?? toStringOrNull(customer.id)
+        )
+        .filter((value): value is string => Boolean(value));
+
+      const indexBundle: CustomerIndexBundle = {
+        customerIndex,
+        shopwareIndex: shopwareIdIndex,
+        numberIndex: customerNumberIndex,
+        emailIndex: customerEmailIndex
+      };
+
+      const currentMetrics = await aggregateOrdersForAnalytics(customerIds, ranges.current, indexBundle);
+      const previousMetrics = await aggregateOrdersForAnalytics(customerIds, ranges.previous, indexBundle);
+
+      const currency = currentMetrics.currency ?? previousMetrics.currency ?? 'EUR';
+
+      const customerNameLookup = new Map<string, string>();
+      for (const customer of filteredCustomers) {
+        if (customer.id) {
+          const baseName = toStringOrNull((customer as any).name ?? null);
+          const fallbackName = [
+            toStringOrNull(customer.firstName ?? null),
+            toStringOrNull(customer.lastName ?? null)
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+
+          const label =
+            toStringOrNull(customer.company ?? null) ||
+            baseName ||
+            (fallbackName.length > 0 ? fallbackName : null) ||
+          toStringOrNull(customer.email ?? null) ||
+          toStringOrNull(customer.customerNumber ?? null) ||
+          customer.id;
+
+          customerNameLookup.set(customer.id, label);
+          const shopwareId = toStringOrNull((customer as any).shopwareCustomerId ?? null);
+          if (shopwareId && !customerNameLookup.has(shopwareId)) {
+            customerNameLookup.set(shopwareId, label);
+          }
+        }
+      }
+
+      const chartRangeEnd = endOfDay(endOfMonth(ranges.current.to));
+      const chartRangeStart = startOfDay(startOfMonth(subMonths(chartRangeEnd, 11)));
+
+      const previousChartRangeEnd = endOfDay(endOfMonth(subYears(chartRangeEnd, 1)));
+      const previousChartRangeStart = startOfDay(subYears(chartRangeStart, 1));
+
+      const trendCurrentResult = await fetchOrdersWithinRange(customerIds, {
+        from: chartRangeStart,
+        to: chartRangeEnd
+      }, indexBundle);
+      const trendPreviousResult = await fetchOrdersWithinRange(customerIds, {
+        from: previousChartRangeStart,
+        to: previousChartRangeEnd
+      }, indexBundle);
+
+      const ordersByMonth = new Map<string, number>();
+      for (const entry of trendCurrentResult.orders) {
+        if (!entry.orderDate || !Number.isFinite(entry.amount)) continue;
+        const key = format(entry.orderDate, 'yyyy-MM');
+        ordersByMonth.set(key, (ordersByMonth.get(key) ?? 0) + entry.amount);
+      }
+
+      const previousOrdersByMonth = new Map<string, number>();
+      for (const entry of trendPreviousResult.orders) {
+        if (!entry.orderDate || !Number.isFinite(entry.amount)) continue;
+        const key = format(entry.orderDate, 'yyyy-MM');
+        previousOrdersByMonth.set(key, (previousOrdersByMonth.get(key) ?? 0) + entry.amount);
+      }
+
+      const monthSequence = eachMonthOfInterval({
+        start: chartRangeStart,
+        end: chartRangeEnd
+      });
+
+      const trend: AnalyticsTrendPoint[] = monthSequence.map((date) => {
+        const monthKey = format(date, 'yyyy-MM');
+        const previousMonthKey = format(subYears(date, 1), 'yyyy-MM');
+
+        return {
+          month: monthKey,
+          label: format(date, 'LLL', { locale: de }),
+          current: Math.round(ordersByMonth.get(monthKey) ?? 0),
+          previous: Math.round(previousOrdersByMonth.get(previousMonthKey) ?? 0)
+        } satisfies AnalyticsTrendPoint;
+      });
+
+      const revenueByCustomer = new Map<string, {
+        customerId: string | null;
+        shopwareCustomerId: string | null;
+        name: string;
+        amount: number;
+        number: string | null;
+        email: string | null;
+        company: string | null;
+        orderNumber: string | null;
+      }>();
+
+      for (const order of currentMetrics.orders) {
+        if (!Number.isFinite(order.amount)) {
+          continue;
+        }
+
+        const shopwareCustomerId = order.shopwareCustomerId ?? null;
+        const crmCustomerId =
+          order.customerId ??
+          (shopwareCustomerId ? shopwareIdIndex.get(shopwareCustomerId) ?? null : null);
+
+        const aggregationKey =
+          crmCustomerId ??
+          (shopwareCustomerId ? `shopware_${shopwareCustomerId}` : `__unknown_${order.id}`);
+
+        const name =
+          (crmCustomerId ? customerNameLookup.get(crmCustomerId) : null) ||
+          order.customerCompany ||
+          order.customerName ||
+          order.customerNumber ||
+          order.customerEmail ||
+          'Unbekannter Kunde';
+
+        const record = revenueByCustomer.get(aggregationKey) ?? {
+          customerId: crmCustomerId,
+          shopwareCustomerId,
+          name,
+          amount: 0,
+          number: order.customerNumber,
+          email: order.customerEmail,
+          company: order.customerCompany,
+          orderNumber: order.orderNumber
+        };
+
+        record.amount += order.amount;
+        record.name = record.name && record.name !== 'Unbekannter Kunde' ? record.name : name;
+        record.number = record.number || order.customerNumber;
+        record.email = record.email || order.customerEmail;
+        record.company = record.company || order.customerCompany;
+        record.orderNumber = record.orderNumber || order.orderNumber;
+        record.customerId = record.customerId ?? crmCustomerId;
+        record.shopwareCustomerId = record.shopwareCustomerId ?? shopwareCustomerId;
+        revenueByCustomer.set(aggregationKey, record);
+      }
+
+      const topCustomers = Array.from(revenueByCustomer.values())
+        .sort((a, b) => b.amount - a.amount)
+        .slice(0, 10)
+        .map((entry) => {
+          const resolvedCustomerId =
+            entry.customerId ||
+            (entry.shopwareCustomerId ? shopwareIdIndex.get(entry.shopwareCustomerId) ?? null : null) ||
+            (entry.number ? customerNumberIndex.get(entry.number) ?? null : null) ||
+            (entry.email ? customerEmailIndex.get(entry.email.toLowerCase()) ?? null : null);
+
+          const lookupName = resolvedCustomerId ? customerNameLookup.get(resolvedCustomerId) : null;
+
+          const displayName = entry.name && entry.name !== 'Unbekannter Kunde'
+            ? entry.name
+            : lookupName ||
+              entry.company ||
+              entry.number ||
+              entry.email ||
+              (resolvedCustomerId ? `Kunde ${resolvedCustomerId}` : null) ||
+              'Unbekannter Kunde';
+
+          return {
+            customerId: resolvedCustomerId,
+            shopwareCustomerId: entry.shopwareCustomerId ?? null,
+            name: displayName,
+            revenue: Math.round(entry.amount),
+            orderNumber: entry.orderNumber ?? null
+          };
+        });
+
+      const orderRows = currentMetrics.orders
+        .sort((a, b) => {
+          if (!a.orderDate && !b.orderDate) return 0;
+          if (!a.orderDate) return 1;
+          if (!b.orderDate) return -1;
+          return b.orderDate.getTime() - a.orderDate.getTime();
+        })
+        .slice(0, 100)
+        .map((order) => ({
+          id: order.id,
+          orderNumber: order.orderNumber,
+          orderDate: order.orderDate ? order.orderDate.toISOString() : null,
+          amount: Number.isFinite(order.amount) ? Number(order.amount) : 0,
+          currency: order.currency ?? currency,
+          customerId: order.customerId,
+          shopwareCustomerId: order.shopwareCustomerId ?? null,
+          customerCompany: order.customerCompany,
+          customerNumber: order.customerNumber,
+          customerEmail: order.customerEmail,
+          customerName: order.customerName,
+          customerFirstName: order.customerFirstName,
+          customerLastName: order.customerLastName,
+        }));
+
+      const responsePayload: AnalyticsSummaryResponse = {
+        period: {
+          type: period,
+          current: {
+            from: ranges.current.from.toISOString(),
+            to: ranges.current.to.toISOString()
+          },
+          previous: {
+            from: ranges.previous.from.toISOString(),
+            to: ranges.previous.to.toISOString()
+          }
+        },
+        filters: {
+          group
+        },
+        totals: {
+          revenue: {
+            currency,
+            current: currentMetrics.totalAmount,
+            previous: previousMetrics.totalAmount
+          },
+          orders: {
+            current: currentMetrics.orderCount,
+            previous: previousMetrics.orderCount
+          }
+        },
+        trend,
+        topCustomers,
+        orders: orderRows,
+        currency,
+        meta: {
+          assignedCustomerCount: assignedCustomers.length,
+          filteredCustomerCount: customerIds.length
+        }
+      } satisfies AnalyticsSummaryResponse;
+
+      console.log('Analytics summary computed', {
+        userId: crmUser.id,
+        period,
+        group,
+        assigned: assignedCustomers.length,
+        filtered: customerIds.length,
+        totalRevenue: currentMetrics.totalAmount,
+        orderCount: currentMetrics.orderCount,
+        trendPoints: trend.length,
+        topCustomers: topCustomers.map((customer) => ({
+          name: customer.name,
+          revenue: customer.revenue,
+          customerId: customer.customerId,
+        })),
+        orderCountReturned: orderRows.length,
+        unmatchedOrders: currentMetrics.unmatched.slice(0, 5)
+      });
+
+      return res.json(responsePayload);
+    } catch (error: any) {
+      console.error('Failed to build analytics summary', {
+        errorId,
+        message: error?.message,
+        stack: error?.stack,
+        userId: req.user?.id,
+        timestamp
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: 'Fehler beim Berechnen der Auswertungen',
+        code: 'ANALYTICS_SUMMARY_ERROR',
+        errorId,
+        timestamp
+      });
+    }
+  });
+
+  app.post(
+    '/admin-api/linther-liste',
+    auth,
+    async (req: AuthRequest, res: Response<LintherListeRow | { error: string }>) => {
+      if (!req.user?.id) {
+        return res.status(401).json({ error: 'Nicht autorisiert' });
+      }
+
+      const schema = z.object({
+        palNr: z.string().optional(),
+        weinbezeichnung: z.string().optional(),
+        artikelnr: z.string().optional(),
+        bemerkung: z.string().optional(),
+        lagerort: z.string().optional()
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Ungültige Eingabe für Linther Liste.' });
+      }
+
+      try {
+        const { accessToken } = await getValidAccessToken(req.user.id);
+        const addedRow = await addLintherListeRow(parsed.data, accessToken);
+        return res.status(201).json(addedRow);
+      } catch (error) {
+        if (error instanceof GraphApiError) {
+          console.error('Failed to add row to Linther Liste', {
+            status: error.statusCode,
+            code: error.code,
+            message: error.message
+          });
+
+          if (error.isAuthError) {
+            return res.status(403).json({
+              error: 'Microsoft-Berechtigungen sind abgelaufen oder unzureichend. Bitte Microsoft-Konto erneut verbinden.'
+            });
+          }
+
+          const status = error.statusCode && error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 500;
+          return res.status(status).json({ error: 'Eintrag konnte nicht hinzugefügt werden.' });
+        }
+
+        console.error('Failed to add row to Linther Liste', {
+          error: error instanceof Error ? error.message : error
+        });
+        return res.status(500).json({ error: 'Eintrag konnte nicht hinzugefügt werden.' });
+      }
+    }
+  );
+
   // Get customers from Shopware
   app.get('/admin-api/search/customer', auth, async (req: AuthRequest, res) => {
     const timestamp = new Date().toISOString();
@@ -2617,7 +4463,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     });
 
     try {
-  if (!req.user?.id) {
+      if (!req.user?.id) {
         console.warn('Missing authenticated user information for customer lookup', { timestamp });
         return res.status(401).json({
           success: false,
