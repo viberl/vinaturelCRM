@@ -1,8 +1,7 @@
 import "./env";
 import { Express, Request, Response, NextFunction, json } from "express";
-import { createServer, Server as HttpServer } from "http";
+import { createServer } from "http";
 import { Server as SocketIOServer, Socket, DefaultEventsMap } from "socket.io";
-import type { Server as SocketIOServerType } from 'socket.io';
 import cors from "cors";
 import dotenv from "dotenv";
 import { randomUUID } from "crypto";
