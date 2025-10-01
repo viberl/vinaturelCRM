@@ -1,6 +1,6 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Link, useLocation } from "wouter";
-import { Map, Users, BarChart3, CheckSquare, Settings, LogOut, LayoutDashboard, Wine, X, Sheet as SheetIcon, Briefcase } from "lucide-react";
+import { Map, Users, BarChart3, CheckSquare, Settings, LogOut, LayoutDashboard, Wine, X, Briefcase, Building2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
@@ -18,15 +18,13 @@ type NavigationItem = {
   isChild?: boolean;
 };
 
-const navigation: NavigationItem[] = [
+const baseNavigation: NavigationItem[] = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { name: "Kunden-Karte", href: "/map", icon: Map },
   { name: "Kundenliste", href: "/customers", icon: Users },
   { name: "Sortiment", href: "/sortiment", icon: Wine },
-  { name: "Linther Liste", href: "/sortiment/linther-liste", icon: SheetIcon, isChild: true },
   { name: "Auswertungen", href: "/auswertungen", icon: BarChart3 },
   { name: "Aufgaben", href: "/tasks", icon: CheckSquare },
-  { name: "Einstellungen", href: "/settings", icon: Settings },
   { name: "Mitarbeiter-Portal", href: "/mitarbeiter-portal", icon: Briefcase },
 ];
 interface SidebarProps {
@@ -57,6 +55,22 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       setLocation('/login');
     }
   };
+
+  const navigationItems = useMemo(() => {
+    const items = [...baseNavigation];
+
+    if (user?.role?.toLowerCase() === 'management') {
+      const managementItem: NavigationItem = {
+        name: "Management Board",
+        href: "/management-board",
+        icon: Building2,
+      };
+
+      return [managementItem, ...items];
+    }
+
+    return items;
+  }, [user?.role]);
 
   const handleItemClick = () => {
     if (typeof window !== "undefined" && window.matchMedia("(min-width: 768px)").matches) {
@@ -98,8 +112,9 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
 
       {/* Navigation Menu */}
       <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
-        {navigation.map((item) => {
+        {navigationItems.map((item) => {
           const Icon = item.icon;
+          const isManagementItem = item.href === "/management-board";
           const isActive =
             location === item.href ||
             location.startsWith(`${item.href}?`) ||
@@ -110,13 +125,25 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               <Button
                 variant="ghost"
                 className={cn(
-                  "w-full justify-start text-foreground hover:bg-muted hover:text-foreground",
-                  isActive && "bg-primary/10 text-primary border-r-2 border-primary",
+                  "w-full justify-start",
+                  isManagementItem
+                    ? "font-semibold text-accent-500 hover:bg-accent/15 hover:text-accent-600"
+                    : "text-foreground hover:bg-muted hover:text-foreground",
+                  isActive &&
+                    (isManagementItem
+                      ? "bg-accent/20 text-accent-600 border-r-2 border-[var(--accent-500)]"
+                      : "bg-primary/10 text-primary border-r-2 border-primary"),
                   item.isChild && "pl-10 text-sm"
                 )}
-              onClick={handleItemClick}
-            >
-              <Icon className="mr-3 h-5 w-5" />
+                onClick={handleItemClick}
+              >
+                <Icon
+                  className={cn(
+                    "mr-3 h-5 w-5",
+                    isManagementItem && !isActive && "text-accent-500",
+                    isManagementItem && isActive && "text-accent-600"
+                  )}
+                />
                 {item.name}
               </Button>
             </Link>

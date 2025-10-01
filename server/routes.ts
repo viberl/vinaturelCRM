@@ -791,6 +791,69 @@ function parseOrderLineItem(item: Record<string, any>): ParsedOrderLineItem {
   } satisfies ParsedOrderLineItem;
 }
 
+function normaliseLineItemSource(source: unknown): Record<string, any>[] {
+  if (!source) {
+    return [];
+  }
+
+  if (Array.isArray(source)) {
+    return source.filter((entry): entry is Record<string, any> => Boolean(entry) && typeof entry === 'object');
+  }
+
+  if (typeof source === 'object') {
+    const record = source as Record<string, any>;
+    if (Array.isArray(record.elements)) {
+      return normaliseLineItemSource(record.elements);
+    }
+    if (Array.isArray(record.data)) {
+      return normaliseLineItemSource(record.data);
+    }
+    if (Array.isArray(record.results)) {
+      return normaliseLineItemSource(record.results);
+    }
+  }
+
+  return [];
+}
+
+function collectEmbeddedLineItems(order: Record<string, any>): Record<string, any>[] {
+  const seen = new Set<string>();
+  const results: Record<string, any>[] = [];
+
+  const register = (entries: Record<string, any>[]) => {
+    for (const entry of entries) {
+      const id = toStringOrNull(entry?.id) ?? null;
+      const dedupeKey = id ?? JSON.stringify(entry ?? {});
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+      results.push(entry);
+    }
+  };
+
+  const candidates = [
+    order?.lineItems,
+    order?.lineItems?.elements,
+    order?.lineItems?.data,
+    order?.line_items,
+    order?.line_items?.elements,
+    order?.line_items?.data,
+    order?.extensions?.lineItems,
+    order?.extensions?.lineItems?.elements,
+    order?.extensions?.lineItems?.data,
+    order?.extensions?.line_items,
+    order?.extensions?.line_items?.elements,
+    order?.extensions?.line_items?.data
+  ];
+
+  for (const candidate of candidates) {
+    register(normaliseLineItemSource(candidate));
+  }
+
+  return results;
+}
+
 function normaliseVolumeValue(value: string | null): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -4999,7 +5062,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
                 value: chunk.join('|')
               }
             ],
-            limit: chunk.length * 50,
+            limit: Math.min(chunk.length * 50, 500),
             includes: {
               order_line_item: [
                 'id',
@@ -5043,6 +5106,37 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
               chunkSize: chunk.length,
               error: lineItemError instanceof Error ? lineItemError.message : lineItemError
             });
+          }
+        }
+      }
+
+      for (const order of shopwareOrders) {
+        const orderId = toStringOrNull(order?.id);
+        if (!orderId) {
+          continue;
+        }
+
+        const existingItems = lineItemMap.get(orderId) ?? [];
+        if (existingItems.length > 0) {
+          continue;
+        }
+
+        const embedded = collectEmbeddedLineItems(order).map((raw) => parseOrderLineItem(raw));
+        if (embedded.length === 0) {
+          continue;
+        }
+
+        lineItemMap.set(orderId, embedded);
+
+        for (const item of embedded) {
+          if (item.productId) {
+            productIds.add(item.productId);
+          }
+          if (item.manufacturerId) {
+            manufacturerIds.add(item.manufacturerId);
+          }
+          for (const propertyId of item.propertyIds) {
+            propertyIds.add(propertyId);
           }
         }
       }
@@ -5183,7 +5277,9 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         const preparedLineItems = parsedLineItems.map((lineItem) =>
           mapLineItemDetails(lineItem, manufacturerMap, productMap, propertyOptionMap)
         );
-        return mapShopwareOrder(order, preparedLineItems);
+
+        const lineItemsOverride = preparedLineItems.length > 0 ? preparedLineItems : undefined; // let mapShopwareOrder fall back to embedded lineItems when lookup returned none
+        return mapShopwareOrder(order, lineItemsOverride);
       });
 
       return res.json(orders);

@@ -62,7 +62,7 @@ function formatCurrency(value: number | null | undefined, currency = "EUR") {
 
 export default function SortimentPage() {
   const { toast } = useToast();
-  const [searchTerm, setSearchTerm] = useState("");
+  const searchTerm = "";
   const [articleNumber, setArticleNumber] = useState("");
   const [selectedWinery, setSelectedWinery] = useState<string | "all">("all");
   const [selectedVintage, setSelectedVintage] = useState<string | "all">("all");
@@ -230,11 +230,9 @@ export default function SortimentPage() {
     <>
       <TopBar
         title="Sortiment"
-        searchValue={searchTerm}
-        searchPlaceholder="Weinname, Region oder Rebsorte"
-        onSearchChange={setSearchTerm}
+        showSearch={false}
         actions={(
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center gap-3">
             <Button
               variant={onlyFavorites ? "secondary" : "outline"}
               onClick={() => setOnlyFavorites((prev) => !prev)}
@@ -259,6 +257,9 @@ export default function SortimentPage() {
                 </Button>
               </PopoverContent>
             </Popover>
+            <Button asChild className="gap-2">
+              <Link href="/sortiment/linther-liste">Linther Liste</Link>
+            </Button>
           </div>
         )}
       />

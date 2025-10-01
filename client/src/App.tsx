@@ -15,6 +15,7 @@ import SortimentDetailPage from "@/pages/SortimentDetailPage";
 import SortimentLintherListePage from "@/pages/SortimentLintherListePage";
 import EmployeePortalPage from "@/pages/EmployeePortalPage";
 import AuswertungenPage from "@/pages/AuswertungenPage";
+import ManagementBoardPage from "@/pages/ManagementBoardPage";
 import Sidebar from "@/components/Sidebar";
 import NotFound from "@/pages/not-found";
 import LoginPage from "@/pages/auth/LoginPage";
@@ -82,6 +83,7 @@ function AppRoutes() {
                 <Route path="/sortiment/linther-liste" component={SortimentLintherListePage} />
                 <Route path="/sortiment/:id" component={SortimentDetailPage} />
                 <Route path="/auswertungen" component={AuswertungenPage} />
+                <Route path="/management-board" component={ManagementBoardPage} />
                 <Route path="/analytics" component={AuswertungenPage} />
                 <Route path="/customer/:id" component={CustomerDetail} />
                 <Route path="/tasks" component={TasksPage} />
