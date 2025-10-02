@@ -16,6 +16,7 @@ import SortimentLintherListePage from "@/pages/SortimentLintherListePage";
 import EmployeePortalPage from "@/pages/EmployeePortalPage";
 import AuswertungenPage from "@/pages/AuswertungenPage";
 import ManagementBoardPage from "@/pages/ManagementBoardPage";
+import ChatPage from "@/pages/ChatPage";
 import Sidebar from "@/components/Sidebar";
 import NotFound from "@/pages/not-found";
 import LoginPage from "@/pages/auth/LoginPage";
@@ -28,6 +29,7 @@ function AppRoutes() {
   const { user } = useAuth();
   const [location, setLocation] = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const unreadTeamChatCount = 0;
 
   // Handle redirects based on auth state
   useEffect(() => {
@@ -55,7 +57,11 @@ function AppRoutes() {
       <Route>
         <ProtectedRoute>
           <div className="flex h-screen overflow-hidden">
-            <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} />
+            <Sidebar
+              isOpen={isSidebarOpen}
+              onClose={() => setIsSidebarOpen(false)}
+              unreadTeamChatCount={unreadTeamChatCount}
+            />
             {isSidebarOpen && (
               <div
                 className="fixed inset-0 z-30 bg-black/40 backdrop-blur-sm md:hidden"
@@ -84,6 +90,7 @@ function AppRoutes() {
                 <Route path="/sortiment/:id" component={SortimentDetailPage} />
                 <Route path="/auswertungen" component={AuswertungenPage} />
                 <Route path="/management-board" component={ManagementBoardPage} />
+                <Route path="/team-chat" component={ChatPage} />
                 <Route path="/analytics" component={AuswertungenPage} />
                 <Route path="/customer/:id" component={CustomerDetail} />
                 <Route path="/tasks" component={TasksPage} />

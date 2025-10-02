@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -67,6 +68,7 @@ export default function SortimentPage() {
   const [selectedWinery, setSelectedWinery] = useState<string | "all">("all");
   const [selectedVintage, setSelectedVintage] = useState<string | "all">("all");
   const [onlyFavorites, setOnlyFavorites] = useState(false);
+  const [hideZeroStock, setHideZeroStock] = useState(true);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [sortOption, setSortOption] = useState<"name" | "stock" | "vintage" | "price">("name");
   const [wishlistItem, setWishlistItem] = useState<CatalogSummaryItem | null>(null);
@@ -116,9 +118,12 @@ export default function SortimentPage() {
       if (selectedVintage !== "all" && (item.vintage ?? "") !== selectedVintage) {
         return false;
       }
+      if (hideZeroStock && item.stock != null && item.stock <= 0) {
+        return false;
+      }
       return true;
     });
-  }, [catalogItems, favorites, onlyFavorites, selectedVintage]);
+  }, [catalogItems, favorites, hideZeroStock, onlyFavorites, selectedVintage]);
 
   const sortedItems = useMemo(() => {
     return [...filteredItems].sort((a, b) => {
@@ -268,9 +273,20 @@ export default function SortimentPage() {
           <div className="p-6 space-y-6 overflow-y-auto">
             <Card className="p-4">
               <div className="flex flex-col gap-6">
-                <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                  <Filter className="h-4 w-4" />
-                  <span>Filter nach Artikelnummer, Weingut, Jahrgang oder Favoriten</span>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                    <Filter className="h-4 w-4" />
+                    <span>Filter nach Artikelnummer, Weingut, Jahrgang oder Favoriten</span>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-foreground" htmlFor="hide-zero-stock">
+                    <Checkbox
+                      id="hide-zero-stock"
+                      className="h-4 w-4"
+                      checked={hideZeroStock}
+                      onCheckedChange={(checked) => setHideZeroStock(Boolean(checked))}
+                    />
+                    ohne Bestand ausblenden
+                  </label>
                 </div>
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <div className="space-y-2">

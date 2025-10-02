@@ -22,7 +22,7 @@ import {
 } from "date-fns";
 import { de } from "date-fns/locale";
 import prisma from "./prismaClient";
-import { adminSearch } from "./shopwareAdmin";
+import { adminSearch, getAdminAxios } from "./shopwareAdmin";
 import {
   Prisma,
   type CustomerInteraction as PrismaCustomerInteraction,
@@ -65,7 +65,10 @@ import type {
   CatalogDetailItem,
   CatalogPriceTier,
   CatalogTopCustomer,
+  CatalogStockHistoryPoint,
+  CatalogMonthlySalesPoint,
 } from "@shared/types/catalog";
+import type { CustomerWishlistResponse, CustomerWishlistEntry } from "@shared/types/customer-wishlist";
 import { auth, AuthRequest, generateToken } from "./auth";
 import jwt from 'jsonwebtoken';
 import { geocodeAddress } from "./geocoding";
@@ -130,6 +133,8 @@ if (!process.env.SHOPWARE_ACCESS_KEY) {
 if (!process.env.CLIENT_URL) {
   console.warn('WARNUNG: CLIENT_URL ist nicht gesetzt. Verwende Standardwert.');
 }
+
+const SHOPWARE_BASE_URL = process.env.SHOPWARE_URL?.replace(/\/$/, '') ?? '';
 
 const customerRelationInclude = {
   salesReps: {
@@ -1417,9 +1422,19 @@ function mapProductToCatalogSummary(product: Record<string, any>): CatalogSummar
   const priceTiers = buildPriceTiersFromProduct(product);
   const allocation = extractAllocationInfo(product);
 
-  const image = toStringOrNull(product?.cover?.media?.url)
-    ?? toStringOrNull(product?.media?.[0]?.media?.url)
-    ?? null;
+  const galleryImages = Array.isArray(product?.media)
+    ? product.media
+        .map((entry: any) => normaliseMediaUrl(toStringOrNull(entry?.media?.url ?? entry?.url)))
+        .filter((value): value is string => Boolean(value))
+    : [];
+
+  const coverImage = normaliseMediaUrl(toStringOrNull(product?.cover?.media?.url ?? product?.cover?.url));
+  if (coverImage) {
+    galleryImages.unshift(coverImage);
+  }
+
+  const uniqueImages = Array.from(new Set(galleryImages));
+  const image = uniqueImages[0] ?? null;
 
   const summary: CatalogSummaryItem = {
     id: toStringOrNull(product?.id) ?? randomUUID(),
@@ -1436,15 +1451,35 @@ function mapProductToCatalogSummary(product: Record<string, any>): CatalogSummar
     certifications,
     prices: priceTiers,
     image,
+    images: uniqueImages,
     allocation,
   };
 
   return summary;
 }
 
+type ProductSalesInsights = {
+  averageMonthlySales: number | null;
+  monthsOfStock: number | null;
+  monthlyBreakdown: CatalogMonthlySalesPoint[];
+};
+
+type AssignedCustomerInfo = {
+  crmId: string;
+  shopwareId: string | null;
+  email: string | null;
+};
+
+type AssignedCustomerIndex = {
+  byShopwareId: Map<string, AssignedCustomerInfo>;
+  byEmail: Map<string, AssignedCustomerInfo>;
+};
+
 function mapProductToCatalogDetail(
   product: Record<string, any>,
   topCustomers: CatalogTopCustomer[],
+  stockHistory: CatalogStockHistoryPoint[],
+  salesInsights: ProductSalesInsights,
 ): CatalogDetailItem {
   const summary = mapProductToCatalogSummary(product);
 
@@ -1457,32 +1492,448 @@ function mapProductToCatalogDetail(
   const detail: CatalogDetailItem = {
     ...summary,
     description: tastingNotes ?? translatedDescription,
-    stockHistory: [],
+    stockHistory,
     topCustomers,
+    averageMonthlySales: salesInsights.averageMonthlySales,
+    monthsOfStock: salesInsights.monthsOfStock,
+    monthlySales: salesInsights.monthlyBreakdown,
   };
 
   return detail;
 }
 
-async function fetchTopCustomersForProduct(productId: string): Promise<CatalogTopCustomer[]> {
+const PRODUCT_SUMMARY_INCLUDES = {
+  product: [
+    'id',
+    'productNumber',
+    'stock',
+    'availableStock',
+    'manufacturerId',
+    'manufacturer',
+    'properties',
+    'options',
+    'customFields',
+    'price',
+    'translated',
+    'coverId',
+    'cover',
+    'media',
+  ],
+  product_translation: ['name', 'description', 'customFields'],
+  product_manufacturer: ['id', 'name'],
+  property_group_option: ['id', 'name', 'customFields', 'group'],
+  property_group: ['id', 'name', 'customFields'],
+  product_media: ['id', 'mediaId', 'position', 'media'],
+  media: ['id', 'url'],
+} as const;
+
+const PRODUCT_SUMMARY_ASSOCIATIONS = {
+  manufacturer: {},
+  properties: {
+    associations: {
+      group: {},
+    },
+  },
+  translations: {},
+  prices: {
+    associations: {
+      rule: {},
+    },
+  },
+  cover: {
+    associations: {
+      media: {},
+    },
+  },
+  media: {
+    limit: 20,
+    associations: {
+      media: {},
+    },
+  },
+} as const;
+
+async function fetchProductsByIds(productIds: string[]): Promise<Map<string, Record<string, any>>> {
+  const map = new Map<string, Record<string, any>>();
+  const unique = Array.from(new Set(productIds.filter((value): value is string => Boolean(value))));
+  if (unique.length === 0) {
+    return map;
+  }
+
+  const chunkSize = 25;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    if (chunk.length === 0) continue;
+
+    try {
+      const response = await adminSearch<any>('/search/product', {
+        filter: [
+          {
+            type: 'equalsAny',
+            field: 'id',
+            value: chunk.join('|'),
+          },
+        ],
+        limit: chunk.length,
+        includes: PRODUCT_SUMMARY_INCLUDES,
+        associations: PRODUCT_SUMMARY_ASSOCIATIONS,
+      });
+
+      for (const product of response?.data ?? []) {
+        const productId = toStringOrNull(product?.id);
+        if (!productId) continue;
+        map.set(productId, product as Record<string, any>);
+      }
+    } catch (batchError) {
+      console.warn('Failed to fetch product batch from Shopware', {
+        chunkSize: chunk.length,
+        firstProductId: chunk[0],
+        error: batchError instanceof Error ? batchError.message : batchError,
+      });
+
+      for (const singleId of chunk) {
+        try {
+          const response = await adminSearch<any>('/search/product', {
+            filter: [
+              {
+                type: 'equals',
+                field: 'id',
+                value: singleId,
+              },
+            ],
+            limit: 1,
+            includes: PRODUCT_SUMMARY_INCLUDES,
+            associations: PRODUCT_SUMMARY_ASSOCIATIONS,
+          });
+
+          const product = response?.data?.[0] ?? null;
+          const productId = toStringOrNull(product?.id);
+          if (!productId) continue;
+          map.set(productId, product as Record<string, any>);
+        } catch (singleError) {
+          console.warn('Failed to fetch product for assortment entry', {
+            productId: singleId,
+            error: singleError instanceof Error ? singleError.message : singleError,
+          });
+        }
+      }
+    }
+  }
+
+  return map;
+}
+
+async function fetchStockHistoryForProduct(
+  productId: string,
+  currentStock: number | null,
+): Promise<CatalogStockHistoryPoint[]> {
+  try {
+    const response = await adminSearch<any>('/search/stock-movement', {
+      filter: [
+        {
+          type: 'equals',
+          field: 'productId',
+          value: productId,
+        },
+      ],
+      sort: [
+        {
+          field: 'createdAt',
+          order: 'ASC',
+        },
+      ],
+      limit: 500,
+      includes: {
+        stock_movement: [
+          'id',
+          'createdAt',
+          'updatedAt',
+          'stock',
+          'quantity',
+          'payload',
+          'sourceStock',
+          'targetStock',
+          'referenceStock',
+        ],
+      },
+    });
+
+    const movements: Record<string, any>[] = Array.isArray(response?.data) ? response.data : [];
+    if (movements.length === 0) {
+      return currentStock != null
+        ? [createStockHistoryPoint(new Date(), currentStock)]
+        : [];
+    }
+
+    const timeline = movements
+      .map((movement) => {
+        const occurredAt = toDate(movement?.createdAt) ?? toDate(movement?.updatedAt);
+        const stockAfter = toNumber(movement?.stock ?? movement?.targetStock ?? movement?.referenceStock);
+        const delta = toNumber(movement?.quantity);
+        const payloadStock = toNumber(movement?.payload?.stock ?? movement?.payload?.targetStock);
+        return {
+          occurredAt,
+          stockAfter,
+          delta,
+          payloadStock,
+        };
+      })
+      .filter((entry) => entry.occurredAt !== null)
+      .sort((a, b) => (a.occurredAt!.getTime() - b.occurredAt!.getTime()));
+
+    if (timeline.length === 0) {
+      return currentStock != null
+        ? [createStockHistoryPoint(new Date(), currentStock)]
+        : [];
+    }
+
+    let runningStock: number | null = null;
+    const history: CatalogStockHistoryPoint[] = [];
+
+    for (const entry of timeline) {
+      const targetStock = entry.stockAfter ?? entry.payloadStock;
+      if (targetStock != null) {
+        runningStock = targetStock;
+      } else if (entry.delta != null) {
+        runningStock = (runningStock ?? 0) + entry.delta;
+      }
+
+      if (runningStock == null) {
+        continue;
+      }
+
+      history.push(createStockHistoryPoint(entry.occurredAt!, runningStock));
+    }
+
+    const condensed = condenseStockHistory(history);
+
+    if (currentStock != null) {
+      const nowPoint = createStockHistoryPoint(new Date(), currentStock);
+      if (condensed.length === 0) {
+        condensed.push(nowPoint);
+      } else {
+        const lastPoint = condensed[condensed.length - 1];
+        const lastDate = toDate(lastPoint.date);
+        const nowDate = nowPointDate(nowPoint);
+        if (!lastDate || isSameMonth(lastDate, nowDate)) {
+          lastPoint.quantity = currentStock;
+          lastPoint.date = nowPoint.date;
+        } else {
+          condensed.push(nowPoint);
+        }
+      }
+    }
+
+    return condensed;
+  } catch (error) {
+    console.warn('Failed to fetch stock history for product', {
+      productId,
+      error: error instanceof Error ? error.message : error,
+    });
+    return currentStock != null
+      ? [createStockHistoryPoint(new Date(), currentStock)]
+      : [];
+  }
+}
+
+function createStockHistoryPoint(date: Date, quantity: number): CatalogStockHistoryPoint {
+  return {
+    date: date.toISOString(),
+    quantity: Math.max(0, Math.round(quantity)),
+  };
+}
+
+function condenseStockHistory(points: CatalogStockHistoryPoint[]): CatalogStockHistoryPoint[] {
+  if (points.length === 0) {
+    return [];
+  }
+
+  const monthly = new Map<string, CatalogStockHistoryPoint>();
+
+  for (const point of points) {
+    const dateObj = toDate(point.date);
+    if (!dateObj) {
+      continue;
+    }
+    const monthKey = `${dateObj.getUTCFullYear()}-${String(dateObj.getUTCMonth() + 1).padStart(2, '0')}`;
+    const normalizedDate = new Date(Date.UTC(dateObj.getUTCFullYear(), dateObj.getUTCMonth(), 1));
+    monthly.set(monthKey, {
+      date: normalizedDate.toISOString(),
+      quantity: point.quantity,
+    });
+  }
+
+  return Array.from(monthly.values()).sort((a, b) => (
+    (toDate(a.date)?.getTime() ?? 0) - (toDate(b.date)?.getTime() ?? 0)
+  ));
+}
+
+function nowPointDate(point: CatalogStockHistoryPoint): Date {
+  return toDate(point.date) ?? new Date();
+}
+
+function isSameMonth(a: Date, b: Date): boolean {
+  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth();
+}
+
+async function mapMyAssortmentEntries(
+  entries: Array<Record<string, any>>
+): Promise<CustomerWishlistEntry[]> {
+  if (!entries || entries.length === 0) {
+    return [];
+  }
+
+  const productIds = entries
+    .map((entry) => toStringOrNull(entry?.productId))
+    .filter((value): value is string => Boolean(value));
+
+  const productMap = await fetchProductsByIds(productIds);
+
+  const normaliseDate = (value: unknown): string | null => {
+    if (!value) return null;
+    const date = new Date(String(value));
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    return date.toISOString();
+  };
+
+  const items: CustomerWishlistEntry[] = [];
+
+  for (const entry of entries) {
+    const entryId =
+      toStringOrNull(entry?.id)
+      ?? toStringOrNull((entry as Record<string, any>)?._uniqueIdentifier ?? null);
+    const productId = toStringOrNull(entry?.productId);
+    if (!productId) {
+      continue;
+    }
+
+    const product = ((entry?.product && typeof entry.product === 'object'
+      ? (entry.product as Record<string, any>)
+      : null) || productMap.get(productId)) ?? null;
+
+    if (!product) {
+      continue;
+    }
+
+    const summary = mapProductToCatalogSummary(product);
+    const addedAt = normaliseDate(entry?.createdAt ?? entry?.updatedAt ?? null);
+
+    items.push({
+      id: entryId ?? productId,
+      productId,
+      addedAt,
+      product: summary,
+    });
+  }
+
+  items.sort((a, b) => {
+    if (!a.addedAt && !b.addedAt) return 0;
+    if (!a.addedAt) return 1;
+    if (!b.addedAt) return -1;
+    return b.addedAt.localeCompare(a.addedAt);
+  });
+
+  return items;
+}
+
+async function buildAssignedCustomerIndex(
+  crmUser: { salesRepId?: string | null; salesRepEmail?: string | null }
+): Promise<AssignedCustomerIndex> {
+  const index: AssignedCustomerIndex = {
+    byShopwareId: new Map(),
+    byEmail: new Map(),
+  };
+
+  const salesRepFilters: Prisma.CustomerToSalesRepWhereInput[] = [];
+  if (crmUser.salesRepId) {
+    salesRepFilters.push({ salesRepId: crmUser.salesRepId });
+  }
+  if (crmUser.salesRepEmail) {
+    salesRepFilters.push({ salesRep: { email: crmUser.salesRepEmail } });
+  }
+
+  if (salesRepFilters.length === 0) {
+    return index;
+  }
+
+  const where: Prisma.CustomerWhereInput = {
+    salesReps: {
+      some: salesRepFilters.length === 1 ? salesRepFilters[0]! : { OR: salesRepFilters },
+    },
+  };
+
+  try {
+    const customers = await prisma.customer.findMany({
+      where,
+      select: {
+        id: true,
+        email: true,
+        shopwareCustomerId: true,
+      },
+    });
+
+    for (const customer of customers) {
+      const info: AssignedCustomerInfo = {
+        crmId: customer.id,
+        shopwareId: customer.shopwareCustomerId ?? null,
+        email: customer.email?.toLowerCase() ?? null,
+      };
+
+      if (info.shopwareId) {
+        index.byShopwareId.set(info.shopwareId, info);
+      }
+      if (info.email) {
+        index.byEmail.set(info.email, info);
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to build assigned customer index', {
+      salesRepId: crmUser.salesRepId,
+      salesRepEmail: crmUser.salesRepEmail,
+      error: error instanceof Error ? error.message : error,
+    });
+  }
+
+  return index;
+}
+
+async function fetchOrderLineItemsForProduct(
+  productId: string,
+  options?: { limit?: number; salesRepId?: string | null }
+): Promise<Record<string, any>[]> {
+  const limit = options?.limit ?? 300;
+  const salesRepId = options?.salesRepId ?? null;
+
   if (!productId) {
     return [];
   }
 
+  const filters: Array<Record<string, unknown>> = [
+    {
+      type: 'equals',
+      field: 'productId',
+      value: productId,
+    },
+    {
+      type: 'equals',
+      field: 'type',
+      value: 'product',
+    },
+  ];
+
+  if (salesRepId) {
+    filters.push({
+      type: 'equals',
+      field: 'order.orderCustomer.customer.customFields.vinaturel_customer_sales_representative_assignment',
+      value: salesRepId,
+    });
+  }
+
   const payload = {
-    filter: [
-      {
-        type: 'equals',
-        field: 'productId',
-        value: productId,
-      },
-      {
-        type: 'equals',
-        field: 'type',
-        value: 'product',
-      },
-    ],
-    limit: 50,
+    filter: filters,
+    limit,
     sort: [
       {
         field: 'order.orderDateTime',
@@ -1500,84 +1951,212 @@ async function fetchTopCustomersForProduct(productId: string): Promise<CatalogTo
 
   try {
     const response = await adminSearch<any>('/search/order-line-item', payload);
-    const entries = response?.data ?? [];
-    const grouped = new Map<string, {
-      id: string;
-      name: string;
-      lastOrdered: number;
-      quantity: number;
-      priceTier: string | null;
-    }>();
-
-    for (const entry of entries) {
-      const parsed = parseOrderLineItem(entry);
-      const order = entry?.order;
-      const orderCustomer = order?.orderCustomer;
-      const customerId = toStringOrNull(orderCustomer?.customerId)
-        ?? toStringOrNull(orderCustomer?.email)
-        ?? toStringOrNull(orderCustomer?.company)
-        ?? toStringOrNull(order?.id)
-        ?? randomUUID();
-
-      const company = toStringOrNull(orderCustomer?.company);
-      const personName = [
-        toStringOrNull(orderCustomer?.firstName),
-        toStringOrNull(orderCustomer?.lastName),
-      ].filter(Boolean).join(' ');
-      const displayName = company || personName || toStringOrNull(orderCustomer?.email) || `Kunde ${customerId.slice(0, 6)}`;
-
-      const orderDate = toStringOrNull(order?.orderDateTime);
-      const timestamp = orderDate ? Date.parse(orderDate) : Date.now();
-
-      let priceTier: string | null = null;
-      const payloadData = parsed.payload ?? null;
-      if (payloadData && typeof payloadData === 'object') {
-        priceTier = toStringOrNull(
-          payloadData.priceGroup
-          ?? payloadData.rule?.name
-          ?? payloadData.ruleName
-          ?? payloadData.priceGroupName
-          ?? payloadData.priceGroupLabel
-        );
-
-        if (!priceTier && payloadData.customFields && typeof payloadData.customFields === 'object') {
-          priceTier = toStringOrNull((payloadData.customFields as Record<string, unknown>).vinaturel_tier_pricing_customer_default_price_group);
-        }
-      }
-
-      const existing = grouped.get(customerId);
-      const quantity = parsed.quantity ?? 0;
-
-      if (!existing || timestamp > existing.lastOrdered) {
-        grouped.set(customerId, {
-          id: customerId,
-          name: displayName,
-          lastOrdered: timestamp,
-          quantity,
-          priceTier,
-        });
-      } else {
-        existing.quantity += quantity;
-      }
-    }
-
-    return Array.from(grouped.values())
-      .sort((a, b) => b.lastOrdered - a.lastOrdered)
-      .slice(0, 5)
-      .map((entry) => ({
-        id: entry.id,
-        name: entry.name,
-        lastOrdered: new Intl.DateTimeFormat('de-DE').format(new Date(entry.lastOrdered)),
-        quantity: Math.round(entry.quantity),
-        priceTier: entry.priceTier,
-      }));
+    return Array.isArray(response?.data) ? response.data : [];
   } catch (error) {
-    console.warn('Failed to fetch top customers for product', {
+    console.warn('Failed to fetch order line items for product', {
       productId,
       error: error instanceof Error ? error.message : error,
     });
     return [];
   }
+}
+
+function buildTopCustomersFromLineItems(
+  entries: Record<string, any>[],
+  options: {
+    assignedIndex?: AssignedCustomerIndex;
+    restrictToAssignments?: boolean;
+  } = {}
+): CatalogTopCustomer[] {
+  if (!entries.length) {
+    return [];
+  }
+
+  const assignedIndex = options.assignedIndex ?? {
+    byShopwareId: new Map(),
+    byEmail: new Map(),
+  };
+  const restrictToAssignments = options.restrictToAssignments ?? false;
+
+  const grouped = new Map<string, {
+    fallbackId: string;
+    name: string;
+    lastOrdered: number;
+    quantity: number;
+    priceTier: string | null;
+    shopwareCustomerId: string | null;
+    email: string | null;
+  }>();
+
+  for (const entry of entries) {
+    const parsed = parseOrderLineItem(entry);
+    const order = entry?.order;
+    const orderCustomer = order?.orderCustomer;
+    const shopwareCustomerId = toStringOrNull(orderCustomer?.customerId);
+    const email = toStringOrNull(orderCustomer?.email)?.toLowerCase() ?? null;
+    const fallbackId = shopwareCustomerId
+      ?? email
+      ?? toStringOrNull(orderCustomer?.company)
+      ?? toStringOrNull(order?.id)
+      ?? parsed.id
+      ?? randomUUID();
+
+    const company = toStringOrNull(orderCustomer?.company);
+    const personName = [
+      toStringOrNull(orderCustomer?.firstName),
+      toStringOrNull(orderCustomer?.lastName),
+    ].filter(Boolean).join(' ');
+    const displayName = company || personName || toStringOrNull(orderCustomer?.email) || `Kunde ${fallbackId.slice(0, 6)}`;
+
+    const orderDate = toStringOrNull(order?.orderDateTime);
+    const timestamp = orderDate ? Date.parse(orderDate) : Date.now();
+
+    let priceTier: string | null = null;
+    const payloadData = parsed.payload ?? null;
+    if (payloadData && typeof payloadData === 'object') {
+      priceTier = toStringOrNull(
+        payloadData.priceGroup
+        ?? payloadData.rule?.name
+        ?? payloadData.ruleName
+        ?? payloadData.priceGroupName
+        ?? payloadData.priceGroupLabel
+      );
+
+      if (!priceTier && payloadData.customFields && typeof payloadData.customFields === 'object') {
+        priceTier = toStringOrNull((payloadData.customFields as Record<string, unknown>).vinaturel_tier_pricing_customer_default_price_group);
+      }
+    }
+
+    const existing = grouped.get(fallbackId);
+    const quantity = parsed.quantity ?? 0;
+
+    if (!existing || timestamp > existing.lastOrdered) {
+      grouped.set(fallbackId, {
+        fallbackId,
+        name: displayName,
+        lastOrdered: timestamp,
+        quantity,
+        priceTier,
+        shopwareCustomerId,
+        email,
+      });
+    } else {
+      existing.quantity += quantity;
+      existing.lastOrdered = Math.max(existing.lastOrdered, timestamp);
+      if (!existing.shopwareCustomerId && shopwareCustomerId) {
+        existing.shopwareCustomerId = shopwareCustomerId;
+      }
+      if (!existing.email && email) {
+        existing.email = email;
+      }
+    }
+  }
+
+  const results: Array<CatalogTopCustomer & { __sortQuantity: number; __sortTimestamp: number }> = [];
+
+  for (const entry of grouped.values()) {
+    const assignedInfo = entry.shopwareCustomerId
+      ? assignedIndex.byShopwareId.get(entry.shopwareCustomerId)
+      : undefined
+        ?? (entry.email ? assignedIndex.byEmail.get(entry.email) : undefined);
+
+    if (restrictToAssignments && !assignedInfo) {
+      continue;
+    }
+
+    const quantity = Math.max(0, entry.quantity);
+    const lastOrderedDate = Number.isFinite(entry.lastOrdered) ? entry.lastOrdered : Date.now();
+
+    results.push({
+      id: assignedInfo?.crmId ?? entry.shopwareCustomerId ?? entry.fallbackId,
+      crmCustomerId: assignedInfo?.crmId ?? null,
+      shopwareCustomerId: assignedInfo?.shopwareId ?? entry.shopwareCustomerId ?? null,
+      email: assignedInfo?.email ?? entry.email ?? null,
+      name: entry.name,
+      lastOrdered: entry.lastOrdered
+        ? new Intl.DateTimeFormat('de-DE').format(new Date(entry.lastOrdered))
+        : null,
+      quantity: Math.round(quantity),
+      priceTier: entry.priceTier,
+      __sortQuantity: quantity,
+      __sortTimestamp: lastOrderedDate,
+    });
+  }
+
+  return results
+    .sort((a, b) => {
+      if (b.__sortQuantity !== a.__sortQuantity) {
+        return b.__sortQuantity - a.__sortQuantity;
+      }
+      return b.__sortTimestamp - a.__sortTimestamp;
+    })
+    .slice(0, 5)
+    .map(({ __sortQuantity, __sortTimestamp, ...customer }) => customer);
+}
+
+function calculateMonthlySalesInsights(
+  entries: Record<string, any>[],
+  currentStock: number | null,
+  monthsWindow = 6,
+): ProductSalesInsights {
+  if (monthsWindow <= 0) {
+    return {
+      averageMonthlySales: null,
+      monthsOfStock: null,
+      monthlyBreakdown: [],
+    };
+  }
+
+  const now = new Date();
+  const anchor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const monthKeys: { key: string; date: Date }[] = [];
+  const allowedMonths = new Set<string>();
+  for (let i = monthsWindow - 1; i >= 0; i -= 1) {
+    const date = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() - i, 1));
+    const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+    monthKeys.push({ key, date });
+    allowedMonths.add(key);
+  }
+
+  const quantityByMonth = new Map<string, number>();
+
+  for (const entry of entries) {
+    const parsed = parseOrderLineItem(entry);
+    const orderDateRaw = toStringOrNull(entry?.order?.orderDateTime) ?? toStringOrNull(entry?.orderDate);
+    const occurredAt = orderDateRaw ? Date.parse(orderDateRaw) : NaN;
+    if (Number.isNaN(occurredAt)) {
+      continue;
+    }
+    const date = new Date(occurredAt);
+    const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (!allowedMonths.has(key)) {
+      continue;
+    }
+    const quantity = Math.max(0, parsed.quantity ?? 0);
+    quantityByMonth.set(key, (quantityByMonth.get(key) ?? 0) + quantity);
+  }
+
+  const breakdown: CatalogMonthlySalesPoint[] = monthKeys.map(({ key, date }) => ({
+    month: key,
+    label: new Intl.DateTimeFormat('de-DE', {
+      month: 'short',
+      year: 'numeric',
+    }).format(date),
+    quantity: Math.round(quantityByMonth.get(key) ?? 0),
+  }));
+
+  const totalQuantity = breakdown.reduce((sum, point) => sum + (point.quantity ?? 0), 0);
+  const averageMonthlySales = breakdown.length > 0 ? totalQuantity / breakdown.length : null;
+
+  const monthsOfStock = currentStock != null && averageMonthlySales && averageMonthlySales > 0
+    ? currentStock / averageMonthlySales
+    : null;
+
+  return {
+    averageMonthlySales: averageMonthlySales ?? null,
+    monthsOfStock,
+    monthlyBreakdown: breakdown,
+  };
 }
 
 function toNumber(value: unknown): number | null {
@@ -1591,12 +2170,46 @@ function toNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function toDate(value: unknown): Date | null {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+
+  if (typeof value === 'string') {
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? new Date(timestamp) : null;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? new Date(value) : null;
+  }
+
+  return null;
+}
+
 function toStringOrNull(value: unknown): string | null {
   if (value === undefined || value === null) {
     return null;
   }
   const result = String(value).trim();
   return result.length > 0 ? result : null;
+}
+
+function normaliseMediaUrl(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(value)) {
+    return value;
+  }
+  if (!SHOPWARE_BASE_URL) {
+    return value;
+  }
+  return value.startsWith('/') ? `${SHOPWARE_BASE_URL}${value}` : `${SHOPWARE_BASE_URL}/${value}`;
 }
 
 function extractQueryParam(value: unknown): string | undefined {
@@ -3827,7 +4440,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
             },
           },
           media: {
-            limit: 1,
+            limit: 20,
             associations: {
               media: {},
             },
@@ -3847,7 +4460,10 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
             'price',
             'translated',
             'coverId',
+            'cover',
+            'media',
           ],
+          product_media: ['id', 'mediaId', 'position', 'media'],
           product_translation: ['name', 'description', 'customFields'],
           product_manufacturer: ['id', 'name'],
           property_group_option: ['id', 'name', 'customFields', 'group'],
@@ -3951,7 +4567,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
             },
           },
           media: {
-            limit: 1,
+            limit: 20,
             associations: {
               media: {},
             },
@@ -3970,7 +4586,10 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
             'price',
             'translated',
             'coverId',
+            'cover',
+            'media',
           ],
+          product_media: ['id', 'mediaId', 'position', 'media'],
           product_translation: ['name', 'description', 'customFields'],
           product_manufacturer: ['id', 'name'],
           property_group_option: ['id', 'name', 'customFields', 'group'],
@@ -3989,8 +4608,18 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         return res.status(404).json({ error: 'Artikel wurde nicht gefunden.' });
       }
 
-      const topCustomers = await fetchTopCustomersForProduct(id);
-      const detailItem = mapProductToCatalogDetail(product, topCustomers);
+      const currentStock = toNumber(product?.stock);
+      const assignedIndex = await buildAssignedCustomerIndex(req.user ?? {});
+      const orderLineItems = await fetchOrderLineItemsForProduct(id, {
+        salesRepId: req.user?.salesRepId ?? null,
+      });
+      const topCustomers = buildTopCustomersFromLineItems(orderLineItems, {
+        assignedIndex,
+        restrictToAssignments: Boolean(req.user?.salesRepId || req.user?.salesRepEmail),
+      });
+      const salesInsights = calculateMonthlySalesInsights(orderLineItems, currentStock);
+      const stockHistory = await fetchStockHistoryForProduct(id, currentStock);
+      const detailItem = mapProductToCatalogDetail(product, topCustomers, stockHistory, salesInsights);
 
       const detailResponse: CatalogDetailResponse = {
         item: detailItem,
@@ -5302,6 +5931,440 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
       });
     }
   });
+
+  app.get(
+    '/admin-api/customer/:id/wishlist',
+    auth,
+    async (req: AuthRequest, res: Response<CustomerWishlistResponse | Record<string, unknown>>) => {
+      const timestamp = new Date().toISOString();
+      const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+      const customerId = req.params.id;
+
+      try {
+        if (!req.user?.id) {
+          return res.status(401).json({
+            success: false,
+            message: 'Nicht autorisiert',
+            code: 'UNAUTHORIZED',
+            errorId,
+            timestamp,
+          });
+        }
+
+        if (!customerId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Kunden-ID fehlt',
+            code: 'MISSING_CUSTOMER_ID',
+            errorId,
+            timestamp,
+          });
+        }
+
+        let shopwareCustomerId: string | null = null;
+        try {
+          const { customer } = await ensureCustomerAccess(customerId, req.user.id);
+          shopwareCustomerId =
+            toStringOrNull((customer as any).shopwareCustomerId ?? null) ??
+            toStringOrNull(customer.id);
+        } catch (error) {
+          if (error instanceof CustomerAccessError) {
+            return res.status(error.status).json({
+              success: false,
+              message: error.message,
+              code: error.code,
+              errorId,
+              timestamp,
+            });
+          }
+          throw error;
+        }
+
+        if (!shopwareCustomerId) {
+          return res.json({ items: [] } satisfies CustomerWishlistResponse);
+        }
+
+        const assortmentResponse = await adminSearch<any>('/search/vinaturel-my-assortment', {
+          filter: [
+            {
+              type: 'equals',
+              field: 'customerId',
+              value: shopwareCustomerId,
+            },
+          ],
+          limit: 500,
+        });
+
+        const assortmentEntries: Array<Record<string, any>> = assortmentResponse?.data ?? [];
+        console.log('Fetched customer wishlist', {
+          customerId,
+          shopwareCustomerId,
+          wishlistCount: assortmentEntries.length,
+        });
+
+        const items = await mapMyAssortmentEntries(assortmentEntries);
+        return res.json({ items } satisfies CustomerWishlistResponse);
+      } catch (error) {
+        console.error('Error fetching customer wishlist', {
+          errorId,
+          message: (error as Error)?.message,
+          stack: (error as Error)?.stack,
+          customerId,
+          userId: req.user?.id,
+          timestamp,
+        });
+
+        return res.status(500).json({
+          success: false,
+          message: 'Fehler beim Abrufen der Merkliste',
+          code: 'CUSTOMER_WISHLIST_ERROR',
+          errorId,
+          timestamp,
+        });
+      }
+    }
+  );
+
+  app.post(
+    '/admin-api/customer/:id/wishlist',
+    auth,
+    async (req: AuthRequest, res: Response<Record<string, unknown>>) => {
+      const timestamp = new Date().toISOString();
+      const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+      const customerId = req.params.id;
+
+      try {
+        if (!req.user?.id) {
+          return res.status(401).json({
+            success: false,
+            message: 'Nicht autorisiert',
+            code: 'UNAUTHORIZED',
+            errorId,
+            timestamp,
+          });
+        }
+
+        if (!customerId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Kunden-ID fehlt',
+            code: 'MISSING_CUSTOMER_ID',
+            errorId,
+            timestamp,
+          });
+        }
+
+        const { customer } = await ensureCustomerAccess(customerId, req.user.id);
+        const shopwareCustomerId =
+          toStringOrNull((customer as any).shopwareCustomerId ?? null) ??
+          toStringOrNull(customer.id);
+
+        if (!shopwareCustomerId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Shopware-Kundenzuordnung fehlt',
+            code: 'MISSING_SHOPWARE_CUSTOMER',
+            errorId,
+            timestamp,
+          });
+        }
+
+        const payload = (req.body ?? {}) as { productId?: unknown; articleNumber?: unknown };
+        let productId = toStringOrNull(payload.productId);
+        const articleNumber = toStringOrNull(payload.articleNumber);
+
+        if (!productId && !articleNumber) {
+          return res.status(400).json({
+            success: false,
+            message: 'Produktreferenz fehlt',
+            code: 'MISSING_PRODUCT_REFERENCE',
+            errorId,
+            timestamp,
+          });
+        }
+
+        if (!productId && articleNumber) {
+          const productResponse = await adminSearch<any>('/search/product', {
+            filter: [
+              {
+                type: 'equals',
+                field: 'productNumber',
+                value: articleNumber,
+              },
+            ],
+            limit: 1,
+          });
+
+          const product = productResponse?.data?.[0] ?? null;
+          productId = toStringOrNull(product?.id);
+
+          if (!productId) {
+            return res.status(404).json({
+              success: false,
+              message: `Kein Produkt mit der Artikelnummer ${articleNumber} gefunden`,
+              code: 'PRODUCT_NOT_FOUND',
+              errorId,
+              timestamp,
+            });
+          }
+        }
+
+        if (!productId) {
+          return res.status(404).json({
+            success: false,
+            message: 'Produkt wurde nicht gefunden',
+            code: 'PRODUCT_NOT_FOUND',
+            errorId,
+            timestamp,
+          });
+        }
+
+        const existingResponse = await adminSearch<any>('/search/vinaturel-my-assortment', {
+          filter: [
+            {
+              type: 'equals',
+              field: 'customerId',
+              value: shopwareCustomerId,
+            },
+            {
+              type: 'equals',
+              field: 'productId',
+              value: productId,
+            },
+          ],
+          limit: 1,
+          includes: {
+            vinaturel_my_assortment: ['id', 'productId', 'customerId', 'createdAt', 'updatedAt'],
+          },
+        });
+
+        if ((existingResponse?.data?.length ?? 0) > 0) {
+          const items = await mapMyAssortmentEntries(existingResponse?.data ?? []);
+          return res.status(200).json({
+            item: items[0] ?? null,
+            success: true,
+            message: 'Produkt ist bereits im Sortiment vorhanden',
+            code: 'ALREADY_EXISTS',
+          });
+        }
+
+        const adminClient = await getAdminAxios();
+        const createResponse = await adminClient.post('/_action/sync', [
+          {
+            action: 'upsert',
+            entity: 'vinaturel_my_assortment',
+            payload: [
+              {
+                productId,
+                productVersionId: '0fa91ce3e96a4bc2be4bd9ce752c3425',
+                customerId: shopwareCustomerId,
+              },
+            ],
+          },
+        ]);
+
+        let createdId = toStringOrNull(createResponse?.data?.data?.[0]?.payload?.[0]?.id ?? null);
+
+        if (!createdId) {
+          const latestResponse = await adminSearch<any>('/search/vinaturel-my-assortment', {
+            filter: [
+              {
+                type: 'equals',
+                field: 'customerId',
+                value: shopwareCustomerId,
+              },
+              {
+                type: 'equals',
+                field: 'productId',
+                value: productId,
+              },
+            ],
+            limit: 1,
+            sort: [
+              {
+                field: 'createdAt',
+                order: 'DESC' as const,
+              },
+            ],
+          });
+          createdId = toStringOrNull(latestResponse?.data?.[0]?.id ?? null);
+        }
+
+        const entryFilters = createdId
+          ? [
+              {
+                type: 'equals',
+                field: 'id',
+                value: createdId,
+              },
+            ]
+          : [
+              {
+                type: 'equals',
+                field: 'customerId',
+                value: shopwareCustomerId,
+              },
+              {
+                type: 'equals',
+                field: 'productId',
+                value: productId,
+              },
+            ];
+
+        const entryResponse = await adminSearch<any>('/search/vinaturel-my-assortment', {
+          filter: entryFilters,
+          limit: 1,
+          includes: {
+            vinaturel_my_assortment: ['id', 'productId', 'customerId', 'createdAt', 'updatedAt'],
+          },
+        });
+
+        const items = await mapMyAssortmentEntries(entryResponse?.data ?? []);
+        const item = items[0] ?? null;
+
+        return res.status(201).json({ item });
+      } catch (error) {
+        console.error('Error adding wishlist entry', {
+          errorId,
+          message: (error as Error)?.message,
+          stack: (error as Error)?.stack,
+          customerId,
+          userId: req.user?.id,
+          timestamp,
+        });
+
+        return res.status(500).json({
+          success: false,
+          message: 'Wein konnte nicht hinzugefügt werden',
+          code: 'CUSTOMER_WISHLIST_ADD_ERROR',
+          errorId,
+          timestamp,
+        });
+      }
+    }
+  );
+
+  app.delete(
+    '/admin-api/customer/:id/wishlist/:entryId',
+    auth,
+    async (req: AuthRequest, res: Response<Record<string, unknown>>) => {
+      const timestamp = new Date().toISOString();
+      const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+      const customerId = req.params.id;
+      const entryId = req.params.entryId;
+
+      try {
+        if (!req.user?.id) {
+          return res.status(401).json({
+            success: false,
+            message: 'Nicht autorisiert',
+            code: 'UNAUTHORIZED',
+            errorId,
+            timestamp,
+          });
+        }
+
+        if (!customerId || !entryId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Kunden- oder Eintrags-ID fehlt',
+            code: 'MISSING_IDENTIFIERS',
+            errorId,
+            timestamp,
+          });
+        }
+
+        const { customer } = await ensureCustomerAccess(customerId, req.user.id);
+        const shopwareCustomerId =
+          toStringOrNull((customer as any).shopwareCustomerId ?? null) ??
+          toStringOrNull(customer.id);
+
+        if (!shopwareCustomerId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Shopware-Kundenzuordnung fehlt',
+            code: 'MISSING_SHOPWARE_CUSTOMER',
+            errorId,
+            timestamp,
+          });
+        }
+
+        const listResponse = await adminSearch<any>('/search/vinaturel-my-assortment', {
+          filter: [
+            {
+              type: 'equals',
+              field: 'customerId',
+              value: shopwareCustomerId,
+            },
+          ],
+          limit: 500,
+          includes: {
+            vinaturel_my_assortment: ['id', 'productId', 'customerId', 'createdAt', 'updatedAt'],
+          },
+        });
+
+        const entries = listResponse?.data ?? [];
+        const matchedEntry = entries.find((entry) => {
+          const productIdCandidate = toStringOrNull(entry?.productId);
+          const customerIdCandidate = toStringOrNull(entry?.customerId);
+          const persistedId = toStringOrNull(entry?.id);
+          const uniqueId = toStringOrNull((entry as Record<string, any>)?._uniqueIdentifier ?? null);
+
+          if (entryId && persistedId && entryId === persistedId) return true;
+          if (entryId && uniqueId && entryId === uniqueId) return true;
+          if (entryId && productIdCandidate && entryId === productIdCandidate) return true;
+          if (entryId && productIdCandidate && customerIdCandidate && entryId === `${productIdCandidate}-${customerIdCandidate}`) return true;
+          return false;
+        });
+
+        const productIdForRemoval = toStringOrNull(matchedEntry?.productId);
+
+        if (!productIdForRemoval) {
+          return res.status(404).json({
+            success: false,
+            message: 'Eintrag wurde nicht gefunden',
+            code: 'WISHLIST_ENTRY_NOT_FOUND',
+            errorId,
+            timestamp,
+          });
+        }
+
+        const adminClient = await getAdminAxios();
+        await adminClient.post('/_action/sync', [
+          {
+            action: 'delete',
+            entity: 'vinaturel_my_assortment',
+            payload: [
+              {
+                productId: productIdForRemoval,
+                customerId: shopwareCustomerId,
+              },
+            ],
+          },
+        ]);
+
+        return res.status(204).send();
+      } catch (error) {
+        console.error('Error removing wishlist entry', {
+          errorId,
+          message: (error as Error)?.message,
+          stack: (error as Error)?.stack,
+          customerId,
+          entryId,
+          userId: req.user?.id,
+          timestamp,
+        });
+
+        return res.status(500).json({
+          success: false,
+          message: 'Wein konnte nicht entfernt werden',
+          code: 'CUSTOMER_WISHLIST_REMOVE_ERROR',
+          errorId,
+          timestamp,
+        });
+      }
+    }
+  );
 
   app.get('/admin-api/customer/:id', auth, async (req: AuthRequest, res) => {
     const timestamp = new Date().toISOString();

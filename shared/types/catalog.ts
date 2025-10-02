@@ -6,12 +6,21 @@ export interface CatalogPriceTier {
 }
 
 export interface CatalogStockHistoryPoint {
+  date: string;
+  quantity: number;
+}
+
+export interface CatalogMonthlySalesPoint {
   month: string;
+  label: string;
   quantity: number;
 }
 
 export interface CatalogTopCustomer {
   id: string;
+  crmCustomerId: string | null;
+  shopwareCustomerId: string | null;
+  email?: string | null;
   name: string;
   lastOrdered: string | null;
   quantity: number | null;
@@ -38,6 +47,7 @@ export interface CatalogSummaryItem {
   certifications: string[];
   prices: CatalogPriceTier[];
   image: string | null;
+  images?: string[];
   allocation?: CatalogAllocationInfo | null;
 }
 
@@ -45,6 +55,9 @@ export interface CatalogDetailItem extends CatalogSummaryItem {
   description: string | null;
   stockHistory: CatalogStockHistoryPoint[];
   topCustomers: CatalogTopCustomer[];
+  averageMonthlySales: number | null;
+  monthsOfStock: number | null;
+  monthlySales: CatalogMonthlySalesPoint[];
 }
 
 export interface CatalogFacetOption {

@@ -1,6 +1,19 @@
 import React, { useMemo } from "react";
 import { Link, useLocation } from "wouter";
-import { Map, Users, BarChart3, CheckSquare, Settings, LogOut, LayoutDashboard, Wine, X, Briefcase, Building2 } from "lucide-react";
+import {
+  Map,
+  Users,
+  BarChart3,
+  CheckSquare,
+  Settings,
+  LogOut,
+  LayoutDashboard,
+  Wine,
+  X,
+  Briefcase,
+  Building2,
+  MessageCircle,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
@@ -26,13 +39,19 @@ const baseNavigation: NavigationItem[] = [
   { name: "Auswertungen", href: "/auswertungen", icon: BarChart3 },
   { name: "Aufgaben", href: "/tasks", icon: CheckSquare },
   { name: "Mitarbeiter-Portal", href: "/mitarbeiter-portal", icon: Briefcase },
+  { name: "Team-Chat", href: "/team-chat", icon: MessageCircle },
 ];
 interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
+  unreadTeamChatCount?: number;
 }
 
-export default function Sidebar({ isOpen, onClose }: SidebarProps) {
+export default function Sidebar({
+  isOpen,
+  onClose,
+  unreadTeamChatCount = 0,
+}: SidebarProps) {
   const [location, setLocation] = useLocation();
   const { user, logout } = useAuth();
 
@@ -115,17 +134,20 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
         {navigationItems.map((item) => {
           const Icon = item.icon;
           const isManagementItem = item.href === "/management-board";
+          const isTeamChatItem = item.href === "/team-chat";
           const isActive =
             location === item.href ||
             location.startsWith(`${item.href}?`) ||
             (item.href === "/map" && (location === "/" || location.startsWith('/map')));
+          const shouldShowBadge = isTeamChatItem && unreadTeamChatCount > 0;
+          const badgeLabel = unreadTeamChatCount > 99 ? "99+" : unreadTeamChatCount;
           
           return (
             <Link key={item.name} href={item.href}>
               <Button
                 variant="ghost"
                 className={cn(
-                  "w-full justify-start",
+                  "w-full justify-between",
                   isManagementItem
                     ? "font-semibold text-accent-500 hover:bg-accent/15 hover:text-accent-600"
                     : "text-foreground hover:bg-muted hover:text-foreground",
@@ -137,14 +159,21 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                 )}
                 onClick={handleItemClick}
               >
-                <Icon
-                  className={cn(
-                    "mr-3 h-5 w-5",
-                    isManagementItem && !isActive && "text-accent-500",
-                    isManagementItem && isActive && "text-accent-600"
-                  )}
-                />
-                {item.name}
+                <span className="flex items-center">
+                  <Icon
+                    className={cn(
+                      "mr-3 h-5 w-5",
+                      isManagementItem && !isActive && "text-accent-500",
+                      isManagementItem && isActive && "text-accent-600"
+                    )}
+                  />
+                  {item.name}
+                </span>
+                {shouldShowBadge && (
+                  <span className="ml-3 flex min-h-[20px] min-w-[20px] items-center justify-center rounded-full bg-[#F37C20] px-1 text-xs font-semibold text-white">
+                    {badgeLabel}
+                  </span>
+                )}
               </Button>
             </Link>
           );

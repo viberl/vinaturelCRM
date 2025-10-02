@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useLocation, useParams } from "wouter";
+import { Link, useLocation, useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import TopBar from "@/components/TopBar";
 import { Button } from "@/components/ui/button";
@@ -23,20 +23,8 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  ChartContainer,
-  ChartTooltipContent,
-  type ChartConfig,
-} from "@/components/ui/chart";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import {
   ArrowLeft,
+  Download,
   FileDown,
   Heart,
   HeartOff,
@@ -49,13 +37,13 @@ import api from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { sampleCustomersForComparison } from "@/data/sampleCustomers";
 import type { CatalogDetailResponse, CatalogDetailItem } from "@shared/types/catalog";
-
-const stockChartConfig: ChartConfig = {
-  stock: {
-    label: "Bestand",
-    color: "hsl(var(--primary))",
-  },
-};
+import {
+  Carousel,
+  CarouselContent,
+  CarouselItem,
+  CarouselNext,
+  CarouselPrevious,
+} from "@/components/ui/carousel";
 
 function formatCurrency(value: number | null | undefined, currency = "EUR") {
   if (value == null) {
@@ -66,6 +54,36 @@ function formatCurrency(value: number | null | undefined, currency = "EUR") {
     currency,
     minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
   }).format(value);
+}
+
+function formatQuantity(value: number | null | undefined) {
+  if (value == null) {
+    return "–";
+  }
+  const absValue = Math.max(0, value);
+  const formatter = new Intl.NumberFormat("de-DE", {
+    maximumFractionDigits: absValue < 10 ? 1 : 0,
+  });
+  return `${formatter.format(absValue)} Fl.`;
+}
+
+function describeCoverage(months: number | null | undefined) {
+  if (months == null || !Number.isFinite(months)) {
+    return null;
+  }
+  if (months <= 0) {
+    return "Reicht bei aktuellem Absatz weniger als 1 Monat.";
+  }
+  if (months < 1) {
+    return "Reicht bei aktuellem Absatz weniger als 1 Monat.";
+  }
+  if (months >= 24) {
+    const years = months / 12;
+    const formatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+    return `Reicht für ca. ${formatter.format(years)} Jahre bei normalem Absatz.`;
+  }
+  const rounded = Math.round(months);
+  return `Reicht für ca. ${rounded} Monat${rounded === 1 ? "" : "e"} bei normalem Absatz.`;
 }
 
 export default function SortimentDetailPage() {
@@ -91,25 +109,6 @@ export default function SortimentDetailPage() {
   const [priceCustomer, setPriceCustomer] = useState<string>(sampleCustomersForComparison[0]?.id ?? "");
   const [priceDialogOpen, setPriceDialogOpen] = useState(false);
 
-  const chartData = useMemo(() => {
-    if (!item?.stockHistory?.length) {
-      return [];
-    }
-    const now = new Date();
-    return [...item.stockHistory]
-      .sort((a, b) => Number(a.month) - Number(b.month))
-      .map((point) => {
-        const offset = Number(point.month);
-        const date = new Date(now);
-        date.setMonth(now.getMonth() + offset);
-        const label = new Intl.DateTimeFormat("de-DE", { month: "short" }).format(date);
-        return {
-          label,
-          quantity: point.quantity,
-        };
-      });
-  }, [item?.stockHistory]);
-
   const priceData = useMemo(() => {
     if (!item || !priceCustomer) {
       return null;
@@ -133,6 +132,20 @@ export default function SortimentDetailPage() {
       discounted: net != null ? net * (1 - customer.discount / 100) : null,
     };
   }, [item, priceCustomer]);
+
+  const galleryImages = useMemo(() => {
+    if (!item) {
+      return [] as string[];
+    }
+    const images = item.images?.filter(Boolean) ?? [];
+    if (images.length > 0) {
+      return images;
+    }
+    return item.image ? [item.image] : [];
+  }, [item]);
+
+  const monthlySales = item?.monthlySales ?? [];
+  const coverageDescription = describeCoverage(item?.monthsOfStock ?? null);
 
   const handleBack = () => {
     navigate("/sortiment");
@@ -179,6 +192,28 @@ export default function SortimentDetailPage() {
       description: `Bestellung für ${item.wineName ?? item.articleNumber ?? "Artikel"} wird über die Admin-API angelegt (Platzhalter).`,
     });
   };
+
+  const renderGalleryImage = (src: string, index: number) => (
+    <div className="group relative flex w-full items-center justify-center bg-background p-4">
+      <img
+        src={src}
+        alt={`${item?.wineName ?? "Artikel"} Bild ${index + 1}`}
+        className="max-h-60 w-full object-contain"
+        loading="lazy"
+      />
+      <Button
+        asChild
+        variant="secondary"
+        size="icon"
+        className="absolute right-3 top-3 h-8 w-8 rounded-full shadow-sm"
+        aria-label="Bild herunterladen"
+      >
+        <a href={src} download>
+          <Download className="h-4 w-4" />
+        </a>
+      </Button>
+    </div>
+  );
 
   if (detailQuery.isLoading) {
     return (
@@ -293,19 +328,35 @@ export default function SortimentDetailPage() {
                   </div>
                 )}
               </div>
-              {item.image && (
-                <div className="flex w-full max-w-[220px] items-center justify-center self-center rounded-lg border border-dashed border-border bg-muted/40 p-4">
-                  <img
-                    src={item.image}
-                    alt={`${item.wineName ?? "Artikel"} Etikett`}
-                    className="h-48 w-auto object-contain"
-                    loading="lazy"
-                  />
+              {galleryImages.length > 0 && (
+                <div className="flex w-full max-w-xs flex-col items-center gap-2 self-center md:self-start">
+                  <div className="relative w-full overflow-hidden rounded-lg border border-dashed border-border bg-muted/30">
+                    {galleryImages.length > 1 ? (
+                      <Carousel opts={{ align: "start" }} className="w-full">
+                        <CarouselContent>
+                          {galleryImages.map((src, index) => (
+                            <CarouselItem key={`${src}-${index}`} className="flex items-center justify-center">
+                              {renderGalleryImage(src, index)}
+                            </CarouselItem>
+                          ))}
+                        </CarouselContent>
+                        <CarouselPrevious className="left-3 top-1/2 h-8 w-8 -translate-y-1/2" />
+                        <CarouselNext className="right-3 top-1/2 h-8 w-8 -translate-y-1/2" />
+                      </Carousel>
+                    ) : (
+                      renderGalleryImage(galleryImages[0]!, 0)
+                    )}
+                  </div>
+                  {galleryImages.length > 1 && (
+                    <span className="text-xs text-muted-foreground">
+                      {galleryImages.length} Bilder verfügbar
+                    </span>
+                  )}
                 </div>
               )}
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+            <div className="grid gap-6 lg:grid-cols-2">
               <Card>
                 <CardHeader>
                   <CardTitle>Verkaufsinformationen</CardTitle>
@@ -338,28 +389,58 @@ export default function SortimentDetailPage() {
               </Card>
               <Card>
                 <CardHeader>
-                  <CardTitle>Bestandsentwicklung</CardTitle>
+                  <CardTitle>Absatz & Reichweite</CardTitle>
                 </CardHeader>
-                <CardContent>
-                  {chartData.length > 0 ? (
-                    <ChartContainer config={stockChartConfig} className="h-56">
-                      <AreaChart data={chartData}>
-                        <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.2} />
-                        <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
-                        <YAxis hide domain={[0, "dataMax + 20"]} />
-                        <Tooltip content={<ChartTooltipContent indicator="line" />} />
-                        <Area
-                          type="monotone"
-                          dataKey="quantity"
-                          stroke="var(--color-stock)"
-                          fill="var(--color-stock)"
-                          fillOpacity={0.2}
-                        />
-                      </AreaChart>
-                    </ChartContainer>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <span className="text-muted-foreground">Ø Monatsabsatz (letzte 6 Monate)</span>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {formatQuantity(item.averageMonthlySales)}
+                      </p>
+                    </div>
+                    <div className="space-y-1">
+                      <span className="text-muted-foreground">Aktueller Bestand</span>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {formatQuantity(item.stock)}
+                      </p>
+                    </div>
+                  </div>
+                  <Separator />
+                  <div className="space-y-1">
+                    {coverageDescription ? (
+                      <p className="text-sm font-medium text-foreground">{coverageDescription}</p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Keine ausreichenden Verkaufsdaten für eine Reichweitenabschätzung.
+                      </p>
+                    )}
+                    {item.averageMonthlySales != null && item.averageMonthlySales > 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Basis: Ø {formatQuantity(item.averageMonthlySales)} über die letzten 6 Monate.
+                      </p>
+                    )}
+                  </div>
+                  {monthlySales.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Letzte Monate</p>
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        {monthlySales.map((point) => (
+                          <div
+                            key={point.month}
+                            className="rounded border border-border/50 bg-muted/30 px-3 py-2"
+                          >
+                            <div className="text-xs text-muted-foreground">{point.label}</div>
+                            <div className="text-sm font-semibold text-foreground">
+                              {formatQuantity(point.quantity)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   ) : (
-                    <div className="flex h-56 items-center justify-center text-sm text-muted-foreground">
-                      Keine Verlaufdaten vorhanden.
+                    <div className="rounded border border-dashed border-border/60 bg-muted/40 px-3 py-4 text-sm text-muted-foreground">
+                      Keine Verkaufsdaten für die letzten Monate verfügbar.
                     </div>
                   )}
                 </CardContent>
@@ -377,20 +458,41 @@ export default function SortimentDetailPage() {
                       Keine Bestellungen gefunden.
                     </div>
                   )}
-                  {item.topCustomers.map((customer) => (
-                    <div key={customer.id} className="flex items-center justify-between rounded border border-border/60 bg-muted/30 px-3 py-2">
-                      <div>
-                        <p className="font-medium text-foreground">{customer.name}</p>
-                        <p className="text-xs text-muted-foreground">
-                          Zuletzt bestellt: {customer.lastOrdered ?? "–"}
-                        </p>
+                  {item.topCustomers.map((customer) => {
+                    const content = (
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <p className="font-medium text-foreground">{customer.name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            Zuletzt bestellt: {customer.lastOrdered ?? "–"}
+                          </p>
+                        </div>
+                        <div className="text-right text-xs text-muted-foreground">
+                          <div className="text-sm font-semibold text-foreground">
+                            {formatQuantity(customer.quantity)}
+                          </div>
+                          <div>Preis: {customer.priceTier ?? "–"}</div>
+                        </div>
                       </div>
-                      <div className="text-right text-xs text-muted-foreground">
-                        <div className="font-semibold text-foreground">{customer.quantity ?? 0} Fl.</div>
-                        <div>Preis: {customer.priceTier ?? "–"}</div>
+                    );
+
+                    const sharedClassName =
+                      "rounded border border-border/60 bg-muted/30 px-3 py-2 transition hover:border-border hover:bg-muted";
+
+                    return customer.crmCustomerId ? (
+                      <Link
+                        key={customer.id}
+                        href={`/customer/${customer.crmCustomerId}`}
+                        className={`block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 ${sharedClassName}`}
+                      >
+                        {content}
+                      </Link>
+                    ) : (
+                      <div key={customer.id} className={`${sharedClassName} opacity-90`}>
+                        {content}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </CardContent>
               </Card>
               <Card>

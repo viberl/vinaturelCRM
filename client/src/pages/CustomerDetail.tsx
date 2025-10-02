@@ -1,7 +1,7 @@
 import { useParams } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Phone, Mail, Edit, Euro, ShoppingCart, Calendar, ChevronRight } from "lucide-react";
+import { ArrowLeft, Phone, Mail, Edit, Euro, ShoppingCart, Calendar, ChevronRight, Heart } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import TopBar from "@/components/TopBar";
 import { Card, CardContent } from "@/components/ui/card";
@@ -18,6 +18,7 @@ import {
 import api from "@/lib/api";
 import type { MapCustomer } from "@shared/types/map-customer";
 import { CustomerOrdersSheet } from "@/components/CustomerOrdersSheet";
+import { CustomerWishlistSheet } from "@/components/CustomerWishlistSheet";
 import { INTERACTION_CATEGORIES } from "@/data/interactionCategories";
 import type { CustomerInteraction, CustomerInteractionsResponse } from "@shared/types/interaction";
 
@@ -51,6 +52,7 @@ export default function CustomerDetail() {
   }, [location]);
 
   const [ordersOpen, setOrdersOpen] = useState(Boolean(orderIdFromQuery));
+  const [wishlistOpen, setWishlistOpen] = useState(false);
   const [initialOrderId, setInitialOrderId] = useState<string | null>(orderIdFromQuery);
 
   useEffect(() => {
@@ -479,22 +481,31 @@ export default function CustomerDetail() {
                   </Card>
 
                   {/* Action Button */}
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={() => {
-                      setOrdersOpen(true);
-                      if (typeof window !== 'undefined') {
-                        const url = new URL(window.location.href);
-                        if (url.searchParams.has('order')) {
-                          url.searchParams.delete('order');
-                          navigate(`${url.pathname}${url.search}`, { replace: true });
+                  <div className="space-y-3">
+                    <Button
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => {
+                        setOrdersOpen(true);
+                        if (typeof window !== 'undefined') {
+                          const url = new URL(window.location.href);
+                          if (url.searchParams.has('order')) {
+                            url.searchParams.delete('order');
+                            navigate(`${url.pathname}${url.search}`, { replace: true });
+                          }
                         }
-                      }
-                    }}
-                  >
-                    Alle Bestellungen anzeigen
-                  </Button>
+                      }}
+                    >
+                      Alle Bestellungen anzeigen
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => setWishlistOpen(true)}
+                    >
+                      <Heart className="mr-2 h-4 w-4" /> Mein Sortiment anzeigen
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -516,6 +527,12 @@ export default function CustomerDetail() {
         customerId={customer.id}
         customerName={customer.name}
         initialOrderId={initialOrderId}
+      />
+      <CustomerWishlistSheet
+        open={wishlistOpen}
+        onOpenChange={setWishlistOpen}
+        customerId={customer.id}
+        customerName={customer.name}
       />
     </>
   );
