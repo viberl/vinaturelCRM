@@ -225,6 +225,7 @@ model CrmUser {
   createdTasks        Task[] @relation("TaskCreatedBy")
   watchingTasks       TaskWatcher[]
   taskUploads         TaskAttachment[] @relation("TaskAttachmentUploader")
+  focusWineUploads    FocusWineList[]
 
   @@map("crm_users")
 }
@@ -243,4 +244,16 @@ model MicrosoftCredential {
   crmUser CrmUser @relation(fields: [crmUserId], references: [id], onDelete: Cascade)
 
   @@map("microsoft_credentials")
+}
+
+model FocusWineList {
+  id             Int       @id @default(autoincrement())
+  articleNumbers String[]
+  fileName       String?
+  uploadedAt     DateTime  @default(now())
+  uploadedById   String?
+
+  uploadedBy CrmUser? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  @@map("focus_wine_list")
 }

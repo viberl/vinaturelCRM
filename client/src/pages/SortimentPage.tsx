@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, type ChangeEvent } from "react";
+import { isAxiosError } from "axios";
 import { Link } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import TopBar from "@/components/TopBar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -15,6 +16,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -29,6 +31,7 @@ import {
   Sparkles,
   Star,
   StarOff,
+  UploadCloud,
 } from "lucide-react";
 import {
   Popover,
@@ -40,6 +43,10 @@ import { Separator } from "@/components/ui/separator";
 import api from "@/lib/api";
 import { sampleCustomersForComparison } from "@/data/sampleCustomers";
 import type { CatalogSummaryItem, CatalogListResponse } from "@shared/types/catalog";
+import type { FocusWineListResponse } from "@shared/types/focus-list";
+import { normalizeArticleNumber } from "@shared/utils/article";
+import { useAuth } from "@/contexts/AuthContext";
+import { cn } from "@/lib/utils";
 
 type CatalogQueryKey = [
   "catalog",
@@ -63,6 +70,8 @@ function formatCurrency(value: number | null | undefined, currency = "EUR") {
 
 export default function SortimentPage() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
   const searchTerm = "";
   const [articleNumber, setArticleNumber] = useState("");
   const [selectedWinery, setSelectedWinery] = useState<string | "all">("all");
@@ -76,6 +85,9 @@ export default function SortimentPage() {
   const [wishlistNote, setWishlistNote] = useState("");
   const [priceItem, setPriceItem] = useState<CatalogSummaryItem | null>(null);
   const [priceCustomer, setPriceCustomer] = useState<string>(sampleCustomersForComparison[0]?.id ?? "");
+  const [focusUploadOpen, setFocusUploadOpen] = useState(false);
+  const [focusUploadFile, setFocusUploadFile] = useState<File | null>(null);
+  const focusFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const catalogQuery = useQuery<CatalogListResponse, Error, CatalogListResponse, CatalogQueryKey>({
     queryKey: [
@@ -109,6 +121,96 @@ export default function SortimentPage() {
   const catalogItems: CatalogSummaryItem[] = catalogQuery.data?.items ?? [];
   const availableWineries = catalogQuery.data?.facets?.wineries ?? [];
   const availableVintages = catalogQuery.data?.facets?.vintages ?? [];
+
+  const focusListQuery = useQuery<FocusWineListResponse>({
+    queryKey: ["focus-wines"],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<FocusWineListResponse>("/admin-api/focus-wines", { signal });
+      return response.data;
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const canUploadFocusList = useMemo(() => {
+    const role = user?.role?.toLowerCase();
+    return role === "management" || role === "innendienst";
+  }, [user?.role]);
+
+  const focusArticleSet = useMemo(() => {
+    const entries = focusListQuery.data?.articleNumbers ?? [];
+    const sanitized = entries
+      .map((entry) => normalizeArticleNumber(entry))
+      .filter((value): value is string => Boolean(value));
+    return new Set(sanitized);
+  }, [focusListQuery.data?.articleNumbers]);
+
+  const focusListLastUpdated = useMemo(() => {
+    if (!focusListQuery.data?.uploadedAt) {
+      return null;
+    }
+    const date = new Date(focusListQuery.data.uploadedAt);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    return new Intl.DateTimeFormat("de-DE", {
+      dateStyle: "short",
+      timeStyle: "short",
+    }).format(date);
+  }, [focusListQuery.data?.uploadedAt]);
+
+  const focusUploadMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await api.post<FocusWineListResponse>("/admin-api/focus-wines/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      return response.data;
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["focus-wines"], data);
+      void queryClient.invalidateQueries({ queryKey: ["focus-wines"] });
+      toast({
+        title: "Fokusliste aktualisiert",
+        description: `${data.count} Artikel sind jetzt als Fokus hinterlegt.`,
+      });
+      setFocusUploadOpen(false);
+      setFocusUploadFile(null);
+      if (focusFileInputRef.current) {
+        focusFileInputRef.current.value = "";
+      }
+    },
+    onError: (error) => {
+      let message = "Upload fehlgeschlagen. Bitte erneut versuchen.";
+      if (isAxiosError(error)) {
+        message = (error.response?.data as { error?: string } | undefined)?.error ?? message;
+      } else if (error instanceof Error) {
+        message = error.message;
+      }
+      toast({
+        title: "Upload fehlgeschlagen",
+        description: message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleFocusFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    setFocusUploadFile(file);
+  };
+
+  const handleFocusUpload = () => {
+    if (!focusUploadFile) {
+      toast({
+        title: "Keine Datei ausgewählt",
+        description: "Bitte wähle zuerst eine CSV- oder Excel-Datei mit Artikelnummern aus.",
+        variant: "destructive",
+      });
+      return;
+    }
+    focusUploadMutation.mutate(focusUploadFile);
+  };
 
   const filteredItems = useMemo(() => {
     return catalogItems.filter((item) => {
@@ -238,6 +340,17 @@ export default function SortimentPage() {
         showSearch={false}
         actions={(
           <div className="flex items-center gap-3">
+            {canUploadFocusList && (
+              <Button
+                variant="outline"
+                className="gap-2 border-accent text-accent-600 hover:bg-accent/10"
+                onClick={() => setFocusUploadOpen(true)}
+                disabled={focusUploadMutation.isPending}
+              >
+                <UploadCloud className="h-4 w-4" />
+                Fokusliste
+              </Button>
+            )}
             <Button
               variant={onlyFavorites ? "secondary" : "outline"}
               onClick={() => setOnlyFavorites((prev) => !prev)}
@@ -287,6 +400,29 @@ export default function SortimentPage() {
                     />
                     ohne Bestand ausblenden
                   </label>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent/40 bg-accent/10 px-3 py-2 text-xs text-accent-600">
+                  <div>
+                {focusListQuery.isLoading ? (
+                  <span>Fokusliste wird geladen…</span>
+                ) : focusListQuery.isError ? (
+                  <span className="text-destructive">Fokusliste konnte nicht geladen werden.</span>
+                ) : focusListQuery.data?.count ? (
+                  <span>{focusListQuery.data.count} Fokusartikel aktiv</span>
+                ) : (
+                  <span>Keine Fokusartikel hinterlegt.</span>
+                )}
+                  </div>
+                  {focusListLastUpdated && (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span>Stand {focusListLastUpdated}</span>
+                      {focusListQuery.data?.uploadedBy?.displayName && (
+                        <span className="text-[11px] text-accent-600">
+                          (von {focusListQuery.data.uploadedBy.displayName})
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <div className="space-y-2">
@@ -369,8 +505,18 @@ export default function SortimentPage() {
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
                 {sortedItems.map((item) => {
                   const isFavorite = favorites.has(item.id);
+                  const articleNumberNormalized = normalizeArticleNumber(item.articleNumber);
+                  const isFocus = articleNumberNormalized ? focusArticleSet.has(articleNumberNormalized) : false;
                   return (
-                    <Card key={item.id} className="relative group">
+                    <Card
+                      key={item.id}
+                      className={cn(
+                        "relative group border border-border transition-shadow",
+                        isFocus
+                          ? "border-[2px] border-accent shadow-[0_0_0_2px_rgba(230,91,45,0.22)]"
+                          : "border-border"
+                      )}
+                    >
                       <button
                         type="button"
                         onClick={() => toggleFavorite(item)}
@@ -391,6 +537,11 @@ export default function SortimentPage() {
                           <span>•</span>
                           <span>{item.articleNumber ?? "–"}</span>
                         </div>
+                        {isFocus && (
+                          <Badge variant="outline" className="mt-3 w-fit border-accent text-accent-600">
+                            Fokuswein
+                          </Badge>
+                        )}
                       </CardHeader>
                       <CardContent className="space-y-4">
                         <div className="flex flex-wrap items-center gap-2">
@@ -481,6 +632,80 @@ export default function SortimentPage() {
           </div>
         </div>
       </main>
+
+      <Dialog
+        open={focusUploadOpen}
+        onOpenChange={(open) => {
+          setFocusUploadOpen(open);
+          if (!open) {
+            setFocusUploadFile(null);
+            if (focusFileInputRef.current) {
+              focusFileInputRef.current.value = "";
+            }
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Fokusliste hochladen</DialogTitle>
+            <DialogDescription>
+              Lade eine CSV- oder Excel-Datei hoch. Es wird ausschließlich die erste Spalte (Artikelnummer) verwendet.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="focus-upload">Datei auswählen</Label>
+              <Input
+                id="focus-upload"
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                ref={focusFileInputRef}
+                onChange={handleFocusFileChange}
+                disabled={focusUploadMutation.isPending}
+              />
+              <p className="text-xs text-muted-foreground">
+                Erwartet werden Artikelnummern in der ersten Spalte. Doppelte Einträge werden automatisch entfernt.
+              </p>
+              {focusUploadFile && (
+                <p className="text-xs font-medium text-foreground">Ausgewählt: {focusUploadFile.name}</p>
+              )}
+            </div>
+            {focusListQuery.data && (
+              <div className="rounded-md border border-dashed border-accent/40 bg-accent/10 px-3 py-2 text-xs text-accent-600">
+                <p>
+                  Aktuell hinterlegt: {focusListQuery.data.count} Artikel
+                  {focusListLastUpdated ? ` · Stand ${focusListLastUpdated}` : ""}
+                  {focusListQuery.data.uploadedBy?.displayName ? ` · von ${focusListQuery.data.uploadedBy.displayName}` : ""}
+                </p>
+              </div>
+            )}
+            {focusUploadMutation.isPending && (
+              <p className="text-xs text-muted-foreground">Upload läuft… bitte warten.</p>
+            )}
+          </div>
+          <DialogFooter className="gap-2 sm:gap-3">
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={focusUploadMutation.isPending}
+              onClick={() => {
+                setFocusUploadOpen(false);
+              }}
+            >
+              Abbrechen
+            </Button>
+            <Button
+              type="button"
+              onClick={handleFocusUpload}
+              disabled={focusUploadMutation.isPending}
+              className="gap-2"
+            >
+              <UploadCloud className="h-4 w-4" />
+              Hochladen
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(wishlistItem)} onOpenChange={(open) => !open && setWishlistItem(null)}>
         <DialogContent className="max-w-lg">

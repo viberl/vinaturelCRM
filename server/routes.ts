@@ -28,6 +28,7 @@ import {
   type CustomerInteraction as PrismaCustomerInteraction,
   type Task as PrismaTask,
   type TaskDependency as PrismaTaskDependency,
+  type FocusWineList,
 } from "@prisma/client";
 import { z } from "zod";
 import { findUserByEmail, verifyPassword, updateUserPassword, updateUserProfileImage } from "./userService";
@@ -72,6 +73,10 @@ import type { CustomerWishlistResponse, CustomerWishlistEntry } from "@shared/ty
 import { auth, AuthRequest, generateToken } from "./auth";
 import jwt from 'jsonwebtoken';
 import { geocodeAddress } from "./geocoding";
+import multer from "multer";
+import * as XLSX from "xlsx";
+import type { FocusWineListResponse } from "@shared/types/focus-list";
+import { normalizeArticleNumber } from "@shared/utils/article";
 import {
   buildMicrosoftAuthUrl,
   exchangeCodeForToken,
@@ -135,6 +140,15 @@ if (!process.env.CLIENT_URL) {
 }
 
 const SHOPWARE_BASE_URL = process.env.SHOPWARE_URL?.replace(/\/$/, '') ?? '';
+
+const focusWineUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+  },
+});
+
+const FOCUS_WINE_ALLOWED_ROLES = new Set(["management", "innendienst"]);
 
 const customerRelationInclude = {
   salesReps: {
@@ -2250,6 +2264,118 @@ function extractQueryParam(value: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function parseFocusArticleNumbers(file: Express.Multer.File): string[] {
+  if (!file || !file.buffer) {
+    throw new Error('Keine Datei gefunden.');
+  }
+
+  const originalName = file.originalname ?? 'upload';
+  const extension = originalName.split('.').pop()?.toLowerCase() ?? '';
+  const collected: string[] = [];
+
+  if (extension === 'xlsx' || extension === 'xls') {
+    try {
+      const workbook = XLSX.read(file.buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      if (!sheetName) {
+        throw new Error('Die Excel-Datei enthält kein Arbeitsblatt.');
+      }
+      const worksheet = workbook.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
+        header: 1,
+        blankrows: false,
+      });
+      for (const row of rows) {
+        if (!Array.isArray(row) || row.length === 0) {
+          continue;
+        }
+        const candidate = normalizeArticleNumber(row[0]);
+        if (!candidate) {
+          continue;
+        }
+        if (/^ARTIKELNUMMER$/i.test(candidate)) {
+          continue;
+        }
+        collected.push(candidate);
+      }
+    } catch (error) {
+      throw new Error('Excel-Datei konnte nicht gelesen werden. Bitte als CSV exportieren oder die Datei prüfen.');
+    }
+  } else {
+    const content = file.buffer.toString('utf-8').replace(/\uFEFF/g, '');
+    const lines = content.split(/\r?\n/);
+    for (const rawLine of lines) {
+      if (!rawLine) {
+        continue;
+      }
+      const trimmedLine = rawLine.trim();
+      if (!trimmedLine) {
+        continue;
+      }
+      const firstColumn = trimmedLine.split(/[;,\t]/)[0] ?? '';
+      const candidate = normalizeArticleNumber(firstColumn);
+      if (!candidate) {
+        continue;
+      }
+      if (/^ARTIKELNUMMER$/i.test(candidate)) {
+        continue;
+      }
+      collected.push(candidate);
+    }
+  }
+
+  const unique = Array.from(new Set(collected.filter(Boolean)));
+
+  if (unique.length === 0) {
+    throw new Error('Keine Artikelnummern gefunden. Bitte sicherstellen, dass die erste Spalte ausgefüllt ist.');
+  }
+
+  if (unique.length > 1500) {
+    throw new Error('Zu viele Artikelnummern in der Liste. Bitte auf maximal 1500 Einträge begrenzen.');
+  }
+
+  return unique;
+}
+
+type FocusWineListWithUploader = FocusWineList & {
+  uploadedBy?: {
+    id: string;
+    firstName: string | null;
+    lastName: string | null;
+    email: string;
+  } | null;
+};
+
+function toFocusWineListResponse(entry: FocusWineListWithUploader | null): FocusWineListResponse {
+  if (!entry) {
+    return {
+      articleNumbers: [],
+      count: 0,
+      fileName: null,
+      uploadedAt: null,
+      uploadedBy: null,
+    };
+  }
+
+  const uploadedBy = entry.uploadedBy
+    ? {
+        id: entry.uploadedBy.id,
+        firstName: entry.uploadedBy.firstName ?? null,
+        lastName: entry.uploadedBy.lastName ?? null,
+        email: entry.uploadedBy.email,
+        displayName: `${entry.uploadedBy.firstName ?? ''} ${entry.uploadedBy.lastName ?? ''}`.trim() || entry.uploadedBy.email,
+      }
+    : null;
+
+  return {
+    articleNumbers: entry.articleNumbers ?? [],
+    count: entry.articleNumbers?.length ?? 0,
+    fileName: entry.fileName ?? null,
+    uploadedAt: entry.uploadedAt?.toISOString() ?? null,
+    uploadedBy,
+  };
 }
 
 type DateRangeInclusive = {
@@ -4425,6 +4551,85 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     errorId?: string;
     timestamp?: string;
   }
+
+  app.get(
+    '/admin-api/focus-wines',
+    auth,
+    async (_req: AuthRequest, res: Response<FocusWineListResponse | { error: string }>) => {
+      try {
+        const latest = await prisma.focusWineList.findFirst({
+          orderBy: {
+            uploadedAt: 'desc',
+          },
+          include: {
+            uploadedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+              },
+            },
+          },
+        });
+
+        return res.json(toFocusWineListResponse(latest));
+      } catch (error) {
+        console.error('Failed to load focus wine list', {
+          error: error instanceof Error ? error.message : error,
+        });
+        return res.status(500).json({ error: 'Fokusliste konnte nicht geladen werden.' });
+      }
+    }
+  );
+
+  app.post(
+    '/admin-api/focus-wines/upload',
+    auth,
+    focusWineUpload.single('file'),
+    async (req: AuthRequest, res: Response<FocusWineListResponse | { error: string }>) => {
+      try {
+        const role = req.user?.role?.toLowerCase() ?? '';
+        if (!FOCUS_WINE_ALLOWED_ROLES.has(role)) {
+          return res.status(403).json({ error: 'Keine Berechtigung für Uploads der Fokusliste.' });
+        }
+
+        if (!req.file) {
+          return res.status(400).json({ error: 'Bitte eine Datei hochladen.' });
+        }
+
+        const articleNumbers = parseFocusArticleNumbers(req.file);
+
+        const created = await prisma.focusWineList.create({
+          data: {
+            articleNumbers,
+            fileName: req.file.originalname ?? null,
+            uploadedById: req.user?.id ?? null,
+          },
+          include: {
+            uploadedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+              },
+            },
+          },
+        });
+
+        return res.status(201).json(toFocusWineListResponse(created));
+      } catch (error) {
+        console.error('Failed to upload focus wine list', {
+          userId: req.user?.id ?? null,
+          error: error instanceof Error ? error.message : error,
+        });
+
+        const message = error instanceof Error ? error.message : 'Fokusliste konnte nicht gespeichert werden.';
+        return res.status(400).json({ error: message });
+      }
+    }
+  );
 
   app.get(
     '/admin-api/catalog',
