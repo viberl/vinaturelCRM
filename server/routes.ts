@@ -30,7 +30,7 @@ import {
   type TaskDependency as PrismaTaskDependency,
 } from "@prisma/client";
 import { z } from "zod";
-import { findUserByEmail, verifyPassword } from "./userService";
+import { findUserByEmail, verifyPassword, updateUserPassword, updateUserProfileImage } from "./userService";
 import type { MapCustomer } from "@shared/types/map-customer";
 import type {
   CreateCustomerInteractionRequest,
@@ -228,6 +228,12 @@ const taskFetchArgs = {
 const isManagementRole = (role?: string | null) =>
   role === 'management' || role === 'admin' || role === 'executive';
 
+const hasAllCustomerAccess = (role?: string | null) => {
+  if (!role) return false;
+  const normalized = role.toLowerCase();
+  return normalized === 'management' || normalized === 'admin' || normalized === 'executive' || normalized === 'innendienst';
+};
+
 const formatUserName = (user?: { firstName: string | null; lastName: string | null; email: string }) => {
   if (!user) return null;
   const name = `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim();
@@ -361,6 +367,7 @@ type CrmUserContext = {
   email?: string | null;
   salesRepEmail?: string | null;
   salesRepId?: string | null;
+  role?: string | null;
 };
 
 function normaliseCoordinateValue(value: number | null | undefined): string | null {
@@ -374,8 +381,11 @@ function normaliseCoordinateValue(value: number | null | undefined): string | nu
 
 function isCustomerAssignedToUser(
   customer: CustomerWithRelations,
-  crmUser: { salesRepId?: string | null; salesRepEmail?: string | null }
+  crmUser: { salesRepId?: string | null; salesRepEmail?: string | null; role?: string | null }
 ): boolean {
+  if (hasAllCustomerAccess(crmUser.role)) {
+    return true;
+  }
   const normalizedEmail = crmUser.salesRepEmail?.toLowerCase() ?? null;
 
   return customer.salesReps.some((assignment) => {
@@ -580,6 +590,7 @@ async function ensureCustomerAccess(customerId: string, crmUserId: string) {
     ? isCustomerAssignedToUser(customer, {
         salesRepId: crmUser.salesRepId,
         salesRepEmail: crmUser.salesRepEmail,
+        role: crmUser.role,
       })
     : false;
 
@@ -603,6 +614,7 @@ async function ensureCustomerAccess(customerId: string, crmUserId: string) {
       ? isCustomerAssignedToUser(customer, {
           salesRepId: crmUser.salesRepId,
           salesRepEmail: crmUser.salesRepEmail,
+          role: crmUser.role,
         })
       : false;
   }
@@ -2054,11 +2066,14 @@ function buildTopCustomersFromLineItems(
 
   const results: Array<CatalogTopCustomer & { __sortQuantity: number; __sortTimestamp: number }> = [];
 
-  for (const entry of grouped.values()) {
-    const assignedInfo = entry.shopwareCustomerId
-      ? assignedIndex.byShopwareId.get(entry.shopwareCustomerId)
-      : undefined
-        ?? (entry.email ? assignedIndex.byEmail.get(entry.email) : undefined);
+  for (const entry of Array.from(grouped.values())) {
+    let assignedInfo: AssignedCustomerInfo | undefined;
+    if (entry.shopwareCustomerId) {
+      assignedInfo = assignedIndex.byShopwareId.get(entry.shopwareCustomerId);
+    }
+    if (!assignedInfo && entry.email) {
+      assignedInfo = assignedIndex.byEmail.get(entry.email);
+    }
 
     if (restrictToAssignments && !assignedInfo) {
       continue;
@@ -3308,6 +3323,24 @@ async function loadAssignedCustomers(
   normalizedEmail: string | null,
   options: { timestamp?: string } = {}
 ): Promise<LoadCustomersResult> {
+  if (hasAllCustomerAccess(crmUser.role)) {
+    const customers = await prisma.customer.findMany({
+      include: customerRelationInclude,
+      orderBy: {
+        updatedAt: 'desc',
+      },
+      take: 500,
+    });
+
+    return {
+      customers: customers as CustomerWithRelations[],
+      synced: false,
+      hadAssignment: true,
+      initialCount: customers.length,
+      requiresSync: false,
+    } satisfies LoadCustomersResult;
+  }
+
   const orConditions: any[] = [];
 
   if (crmUser.salesRepId) {
@@ -3396,7 +3429,8 @@ async function loadAssignedCustomers(
   const allowedCustomers = (customers as CustomerWithRelations[]).filter((customer) =>
     isCustomerAssignedToUser(customer, {
       salesRepId: crmUser.salesRepId,
-      salesRepEmail: crmUser.salesRepEmail
+      salesRepEmail: crmUser.salesRepEmail,
+      role: crmUser.role,
     })
   );
 
@@ -3966,6 +4000,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
       role: string;
       salesRepEmail?: string | null;
       salesRepId?: string | null;
+      profileImageUrl?: string | null;
       contextToken?: string;
     };
     message?: string;
@@ -4085,6 +4120,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         role: crmUser.role ?? 'sales_rep',
         salesRepEmail,
         salesRepId: crmUser.salesRepId ?? null,
+        profileImageUrl: crmUser.profileImageUrl ?? null,
         contextToken: undefined
       };
       
@@ -4382,6 +4418,7 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
       role: string;
       salesRepEmail?: string | null;
       salesRepId?: string | null;
+      profileImageUrl?: string | null;
     };
     message?: string;
     code?: string;
@@ -4714,7 +4751,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           id: crmUser.id,
           email: crmUser.email,
           salesRepEmail: crmUser.salesRepEmail,
-          salesRepId: crmUser.salesRepId
+          salesRepId: crmUser.salesRepId,
+          role: crmUser.role,
         },
         normalizedEmail,
         { timestamp }
@@ -5185,7 +5223,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           id: crmUser.id,
           email: crmUser.email,
           salesRepEmail: crmUser.salesRepEmail,
-          salesRepId: crmUser.salesRepId
+          salesRepId: crmUser.salesRepId,
+          role: crmUser.role,
         },
         normalizedEmail,
         { timestamp }
@@ -5264,7 +5303,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           id: crmUser.id,
           email: crmUser.email,
           salesRepEmail: crmUser.salesRepEmail,
-          salesRepId: crmUser.salesRepId
+          salesRepId: crmUser.salesRepId,
+          role: crmUser.role,
         },
         normalizedEmail,
         { timestamp }
@@ -5512,7 +5552,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
 
       const customerAssigned = customer && isCustomerAssignedToUser(customer, {
         salesRepId: crmUser.salesRepId,
-        salesRepEmail: crmUser.salesRepEmail
+        salesRepEmail: crmUser.salesRepEmail,
+        role: crmUser.role,
       });
 
       if ((!customer || !customerAssigned) && (crmUser.salesRepId || normalizedEmail)) {
@@ -5543,7 +5584,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
 
       if (!isCustomerAssignedToUser(customer, {
         salesRepId: crmUser.salesRepId,
-        salesRepEmail: crmUser.salesRepEmail
+        salesRepEmail: crmUser.salesRepEmail,
+        role: crmUser.role,
       })) {
         return res.status(403).json({
           success: false,
@@ -6419,7 +6461,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
 
       const customerAssigned = customer && isCustomerAssignedToUser(customer, {
         salesRepId: crmUser.salesRepId,
-        salesRepEmail: crmUser.salesRepEmail
+        salesRepEmail: crmUser.salesRepEmail,
+        role: crmUser.role,
       });
 
       if ((!customer || !customerAssigned) && (crmUser.salesRepId || normalizedEmail)) {
@@ -6447,7 +6490,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
 
       if (!isCustomerAssignedToUser(customer, {
         salesRepId: crmUser.salesRepId,
-        salesRepEmail: crmUser.salesRepEmail
+        salesRepEmail: crmUser.salesRepEmail,
+        role: crmUser.role,
       })) {
         return res.status(403).json({
           success: false,
@@ -7639,6 +7683,167 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
     }
   });
 
+  app.patch('/admin-api/me/password', auth, async (req: AuthRequest, res) => {
+    const timestamp = new Date().toISOString();
+    const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    try {
+      if (!req.user?.id) {
+        return res.status(401).json({
+          success: false,
+          message: 'Nicht autorisiert',
+          code: 'UNAUTHORIZED',
+          errorId,
+          timestamp,
+        });
+      }
+
+      const schema = z
+        .object({
+          currentPassword: z.string().min(1, 'Aktuelles Passwort ist erforderlich'),
+          newPassword: z.string().min(8, 'Neues Passwort muss mindestens 8 Zeichen lang sein'),
+        })
+        .refine((data) => data.currentPassword !== data.newPassword, {
+          message: 'Neues Passwort darf nicht mit dem aktuellen Passwort übereinstimmen',
+          path: ['newPassword'],
+        });
+
+      const parsed = schema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          success: false,
+          message: 'Ungültige Eingabe',
+          code: 'INVALID_INPUT',
+          errorId,
+          timestamp,
+          issues: parsed.error.flatten(),
+        });
+      }
+
+      const { currentPassword, newPassword } = parsed.data;
+
+      const crmUser = await prisma.crmUser.findUnique({ where: { id: req.user.id } });
+      if (!crmUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'Benutzer wurde nicht gefunden',
+          code: 'USER_NOT_FOUND',
+          errorId,
+          timestamp,
+        });
+      }
+
+      const passwordValid = await verifyPassword(crmUser.passwordHash, currentPassword);
+      if (!passwordValid) {
+        return res.status(400).json({
+          success: false,
+          message: 'Aktuelles Passwort ist falsch',
+          code: 'INVALID_CURRENT_PASSWORD',
+          errorId,
+          timestamp,
+        });
+      }
+
+      await updateUserPassword(crmUser.id, newPassword);
+
+      return res.json({
+        success: true,
+        message: 'Passwort wurde erfolgreich aktualisiert',
+        timestamp,
+      });
+    } catch (error) {
+      console.error('Error updating password', {
+        message: (error as Error)?.message,
+        stack: (error as Error)?.stack,
+        errorId,
+        timestamp,
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: 'Passwort konnte nicht aktualisiert werden',
+        code: 'PASSWORD_UPDATE_ERROR',
+        errorId,
+        timestamp,
+      });
+    }
+  });
+
+  app.patch('/admin-api/me/profile-image', auth, async (req: AuthRequest, res) => {
+    const timestamp = new Date().toISOString();
+    const errorId = `err_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    try {
+      if (!req.user?.id) {
+        return res.status(401).json({
+          success: false,
+          message: 'Nicht autorisiert',
+          code: 'UNAUTHORIZED',
+          errorId,
+          timestamp,
+        });
+      }
+
+      const schema = z.object({
+        image: z
+          .string()
+          .trim()
+          .max(5_000_000, 'Bild ist zu groß (max. 5 MB)')
+          .regex(/^data:image\/(png|jpe?g|gif|webp);base64,/i, 'Ungültiges Bildformat')
+          .nullable()
+          .optional(),
+      });
+
+      const parsed = schema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          success: false,
+          message: 'Ungültige Eingabe',
+          code: 'INVALID_INPUT',
+          errorId,
+          timestamp,
+          issues: parsed.error.flatten(),
+        });
+      }
+
+      const image = parsed.data.image ?? null;
+
+      const crmUser = await prisma.crmUser.findUnique({ where: { id: req.user.id } });
+      if (!crmUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'Benutzer wurde nicht gefunden',
+          code: 'USER_NOT_FOUND',
+          errorId,
+          timestamp,
+        });
+      }
+
+      await updateUserProfileImage(crmUser.id, image);
+
+      return res.json({
+        success: true,
+        message: image ? 'Profilbild wurde aktualisiert' : 'Profilbild wurde entfernt',
+        timestamp,
+      });
+    } catch (error) {
+      console.error('Error updating profile image', {
+        message: (error as Error)?.message,
+        stack: (error as Error)?.stack,
+        errorId,
+        timestamp,
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: 'Profilbild konnte nicht aktualisiert werden',
+        code: 'PROFILE_IMAGE_UPDATE_ERROR',
+        errorId,
+        timestamp,
+      });
+    }
+  });
+
   // Get current user
   app.get('/api/auth/me', auth, async (req: AuthRequest, res: Response<MeResponseData>) => {
     const timestamp = new Date().toISOString();
@@ -7702,7 +7907,8 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           customerNumber: null,
           role: dbUser.role ?? 'sales_rep',
           salesRepEmail: (dbUser.salesRepEmail ?? dbUser.email)?.toLowerCase() ?? null,
-          salesRepId: dbUser.salesRepId ?? null
+          salesRepId: dbUser.salesRepId ?? null,
+          profileImageUrl: dbUser.profileImageUrl ?? null
         }
       });
       

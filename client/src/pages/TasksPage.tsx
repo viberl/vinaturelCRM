@@ -4,7 +4,7 @@ import { format, addMonths, subMonths, startOfMonth, endOfMonth, startOfWeek, en
 import { de } from "date-fns/locale";
 import { DragDropContext, Droppable, Draggable, type DropResult } from "@hello-pangea/dnd";
 import { CalendarIcon, Check, ChevronLeft, ChevronRight, Clock, Eye, Loader2, Paperclip, Plus, Trash2, Users } from "lucide-react";
-import { Link } from "wouter";
+import { Link, useLocation, useRoute } from "wouter";
 import TopBar from "@/components/TopBar";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -128,6 +128,8 @@ function TaskPriorityDot({ priority }: { priority: TaskPriority }) {
 
 export default function TasksPage() {
   const { user } = useAuth();
+  const [, setLocation] = useLocation();
+  const [matchTaskRoute, taskRouteParams] = useRoute<{ taskId: string }>("/tasks/:taskId");
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -138,6 +140,7 @@ export default function TasksPage() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [isTaskDetailOpen, setIsTaskDetailOpen] = useState(false);
   const [isCreateSheetOpen, setIsCreateSheetOpen] = useState(false);
+  const routeTaskId = matchTaskRoute ? taskRouteParams.taskId : null;
 
   const filters = useMemo(
     () => ({
@@ -251,6 +254,7 @@ export default function TasksPage() {
       setIsCreateSheetOpen(false);
       setSelectedTaskId(createdTask.id);
       setIsTaskDetailOpen(true);
+      setLocation(`/tasks/${createdTask.id}`);
     },
     onError: (error: unknown) => {
       console.error("Task creation failed", error);
@@ -303,11 +307,13 @@ export default function TasksPage() {
   const handleOpenTask = (taskId: string) => {
     setSelectedTaskId(taskId);
     setIsTaskDetailOpen(true);
+    setLocation(`/tasks/${taskId}`);
   };
 
   const handleCloseTask = () => {
     setIsTaskDetailOpen(false);
     setSelectedTaskId(null);
+    setLocation("/tasks");
   };
 
   const handleCalendarDragEnd = (result: DropResult) => {
@@ -336,10 +342,28 @@ export default function TasksPage() {
   );
 
   useEffect(() => {
-    if (!selectedTask && isTaskDetailOpen) {
+    if (!selectedTask && isTaskDetailOpen && !tasksLoading && !tasksFetching) {
       setIsTaskDetailOpen(false);
     }
-  }, [selectedTask, isTaskDetailOpen]);
+  }, [selectedTask, isTaskDetailOpen, tasksLoading, tasksFetching]);
+
+  useEffect(() => {
+    if (routeTaskId) {
+      if (routeTaskId !== selectedTaskId) {
+        setSelectedTaskId(routeTaskId);
+      }
+      if (!isTaskDetailOpen) {
+        setIsTaskDetailOpen(true);
+      }
+    } else {
+      if (selectedTaskId) {
+        setSelectedTaskId(null);
+      }
+      if (isTaskDetailOpen) {
+        setIsTaskDetailOpen(false);
+      }
+    }
+  }, [routeTaskId, selectedTaskId, isTaskDetailOpen]);
 
   const monthStart = startOfMonth(calendarCursor);
   const monthEnd = endOfMonth(calendarCursor);

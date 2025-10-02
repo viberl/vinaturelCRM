@@ -9,6 +9,7 @@ export interface CreateUserInput {
   salesRepEmail?: string;
   salesRepId?: string;
   role?: string;
+  profileImageUrl?: string | null;
 }
 
 export async function findUserByEmail(email: string) {
@@ -29,7 +30,8 @@ export async function createUser(input: CreateUserInput) {
       lastName: input.lastName,
       salesRepEmail: input.salesRepEmail?.toLowerCase(),
       salesRepId: input.salesRepId,
-      role: input.role ?? 'sales_rep'
+      role: input.role ?? 'sales_rep',
+      profileImageUrl: input.profileImageUrl ?? null,
     }
   });
 }
@@ -44,7 +46,8 @@ export async function upsertUser(input: CreateUserInput) {
       lastName: input.lastName,
       salesRepEmail: input.salesRepEmail?.toLowerCase(),
       salesRepId: input.salesRepId,
-      role: input.role ?? 'sales_rep'
+      role: input.role ?? 'sales_rep',
+      profileImageUrl: input.profileImageUrl ?? null,
     },
     create: {
       email: input.email.toLowerCase(),
@@ -53,7 +56,23 @@ export async function upsertUser(input: CreateUserInput) {
       lastName: input.lastName,
       salesRepEmail: input.salesRepEmail?.toLowerCase(),
       salesRepId: input.salesRepId,
-      role: input.role ?? 'sales_rep'
+      role: input.role ?? 'sales_rep',
+      profileImageUrl: input.profileImageUrl ?? null,
     }
+  });
+}
+
+export async function updateUserPassword(userId: string, newPassword: string) {
+  const passwordHash = await argon2.hash(newPassword);
+  return prisma.crmUser.update({
+    where: { id: userId },
+    data: { passwordHash }
+  });
+}
+
+export async function updateUserProfileImage(userId: string, profileImageUrl: string | null) {
+  return prisma.crmUser.update({
+    where: { id: userId },
+    data: { profileImageUrl }
   });
 }

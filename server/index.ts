@@ -122,8 +122,10 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const DEFAULT_BODY_LIMIT = process.env.BODY_LIMIT ?? '5mb';
+
+app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
 app.use(cookieParser());
 
 // Request logger

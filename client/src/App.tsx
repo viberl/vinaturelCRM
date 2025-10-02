@@ -24,6 +24,7 @@ import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import ProtectedRoute from "@/components/auth/ProtectedRoute";
 import { Button } from "@/components/ui/button";
 import { Menu } from "lucide-react";
+import AccountPage from "@/pages/AccountPage";
 
 function AppRoutes() {
   const { user } = useAuth();
@@ -91,8 +92,10 @@ function AppRoutes() {
                 <Route path="/auswertungen" component={AuswertungenPage} />
                 <Route path="/management-board" component={ManagementBoardPage} />
                 <Route path="/team-chat" component={ChatPage} />
+                <Route path="/account" component={AccountPage} />
                 <Route path="/analytics" component={AuswertungenPage} />
                 <Route path="/customer/:id" component={CustomerDetail} />
+                <Route path="/tasks/:taskId" component={TasksPage} />
                 <Route path="/tasks" component={TasksPage} />
                 <Route path="/mitarbeiter-portal" component={EmployeePortalPage} />
                 <Route

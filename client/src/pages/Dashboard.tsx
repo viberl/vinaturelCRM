@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { LayoutDashboard, Loader2, ShoppingCart, ArrowRight, Euro, Users, TrendingUp, CalendarDays, RefreshCw, ExternalLink, Plug, Unlink } from "lucide-react";
+import { LayoutDashboard, Loader2, ShoppingCart, ArrowRight, Euro, Users, TrendingUp, CalendarDays, RefreshCw, ExternalLink, Plug, Unlink, CheckSquare } from "lucide-react";
 import { Link, useLocation } from "wouter";
 
 import TopBar from "@/components/TopBar";
@@ -9,7 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import api from "@/lib/api";
 import type { DashboardData, DashboardOrderSummary } from "@shared/types/dashboard";
+import type { Task, TaskListResponse, TaskPriority, TaskStatus } from "@shared/types/task";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 
 function formatCurrency(value: number | null | undefined, currency?: string | null) {
   if (value === null || value === undefined) {
@@ -68,6 +70,32 @@ type CalendarResponse = {
   message?: string;
 };
 
+const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
+  open: 'Offen',
+  in_progress: 'In Bearbeitung',
+  waiting: 'Wartet',
+  completed: 'Erledigt'
+};
+
+const TASK_STATUS_CLASS: Record<TaskStatus, string> = {
+  open: 'bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-100',
+  in_progress: 'bg-blue-200 text-blue-900 dark:bg-blue-500/20 dark:text-blue-100',
+  waiting: 'bg-amber-200 text-amber-900 dark:bg-amber-500/20 dark:text-amber-200',
+  completed: 'bg-emerald-200 text-emerald-900 dark:bg-emerald-500/20 dark:text-emerald-100'
+};
+
+const TASK_PRIORITY_LABEL: Record<TaskPriority, string> = {
+  high: 'Hoch',
+  medium: 'Mittel',
+  low: 'Niedrig'
+};
+
+const TASK_PRIORITY_COLOR: Record<TaskPriority, string> = {
+  high: 'bg-red-500',
+  medium: 'bg-amber-500',
+  low: 'bg-emerald-500'
+};
+
 function formatCalendarDate(date: CalendarDateTime | null) {
   if (!date?.dateTime) {
     return '–';
@@ -111,6 +139,7 @@ export default function Dashboard() {
   const { toast } = useToast();
   const [isStartingOAuth, setIsStartingOAuth] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
+  const { user } = useAuth();
 
   const { data, isLoading, isError, error, refetch } = useQuery<DashboardData>({
     queryKey: ['/admin-api/dashboard/orders'],
@@ -153,10 +182,36 @@ export default function Dashboard() {
     ? 'secondary'
     : 'outline';
 
+  const {
+    data: tasksData,
+    isLoading: tasksLoading,
+    isFetching: tasksFetching,
+    isError: tasksIsError,
+    error: tasksError,
+    refetch: refetchTasks
+  } = useQuery<TaskListResponse>({
+    queryKey: ['/admin-api/tasks', { scope: 'dashboard', userId: user?.id ?? null }],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      params.set('status', 'open,in_progress,waiting');
+      if (user?.id) {
+        params.set('assignee', user.id);
+      }
+      const response = await api.get('/admin-api/tasks', { params });
+      return response.data as TaskListResponse;
+    },
+    enabled: Boolean(user?.id),
+    staleTime: 1000 * 30
+  });
+
   const orders = data?.orders ?? [];
   const stats = data?.stats;
 
   const hasOrders = orders.length > 0;
+
+  const tasks = (tasksData?.tasks ?? []).slice(0, 5);
+  const tasksSummary = tasksData?.summary;
+  const tasksLoadingState = tasksLoading || tasksFetching;
 
   const metrics = useMemo(() => {
     const totalRevenue = stats ? formatCurrency(stats.totalRevenue ?? 0, 'EUR') : '–';
@@ -450,6 +505,107 @@ export default function Dashboard() {
     );
   }, [calendarLoading, calendarFetching, calendarIsError, calendarErrorMessage, refetchCalendar, isCalendarConfigured, isCalendarConnected, calendarEvents, isStartingOAuth, startMicrosoftOAuth]);
 
+  const tasksContent = useMemo(() => {
+    if (!user?.id) {
+      return (
+        <div className="flex h-32 items-center justify-center text-muted-foreground">
+          Benutzerdaten werden geladen…
+        </div>
+      );
+    }
+
+    if (tasksLoadingState) {
+      return (
+        <div className="flex h-32 items-center justify-center text-muted-foreground">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+          Aufgaben werden geladen…
+        </div>
+      );
+    }
+
+    if (tasksIsError) {
+      const message = tasksError instanceof Error ? tasksError.message : 'Aufgaben konnten nicht geladen werden.';
+      return (
+        <div className="flex flex-col items-center justify-center gap-2 p-6 text-center text-sm text-red-600">
+          <p>{message}</p>
+          <button
+            type="button"
+            onClick={() => refetchTasks()}
+            className="text-primary underline"
+          >
+            Erneut versuchen
+          </button>
+        </div>
+      );
+    }
+
+    if (tasks.length === 0) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-3 p-6 text-center text-muted-foreground">
+          <CheckSquare className="h-8 w-8" />
+          <div>
+            <p className="font-medium text-foreground">Keine Aufgaben vorhanden</p>
+            <p className="text-sm">Neue oder zugewiesene Aufgaben erscheinen hier automatisch.</p>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-3">
+        {tasks.map((task: Task) => {
+          const statusLabel = TASK_STATUS_LABEL[task.status];
+          const priorityLabel = task.priority ? TASK_PRIORITY_LABEL[task.priority] : null;
+          const priorityColor = task.priority ? TASK_PRIORITY_COLOR[task.priority] : null;
+          const scheduleLabel = task.dueAt
+            ? `Fällig: ${formatDate(task.dueAt)}`
+            : task.startAt
+            ? `Start: ${formatDate(task.startAt)}`
+            : 'Kein Termin hinterlegt';
+
+          return (
+            <button
+              key={task.id}
+              type="button"
+              onClick={() => setLocation(`/tasks/${task.id}`)}
+              className="w-full rounded-lg border border-border bg-card/80 p-3 text-left transition hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+            >
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <Badge className={`capitalize ${TASK_STATUS_CLASS[task.status]}`}>{statusLabel}</Badge>
+                  {priorityLabel && priorityColor && (
+                    <span className="flex items-center gap-1 text-muted-foreground">
+                      <span className={`inline-block h-2.5 w-2.5 rounded-full ${priorityColor}`} />
+                      {priorityLabel}
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm font-medium text-foreground">{task.title}</p>
+                {task.customerName && (
+                  <p className="text-xs text-muted-foreground">{task.customerName}</p>
+                )}
+                <p className="text-xs text-muted-foreground">{scheduleLabel}</p>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    );
+  }, [tasksLoadingState, tasksIsError, tasksError, refetchTasks, tasks, user?.id]);
+
+  const tasksSummaryLabel = useMemo(() => {
+    if (!tasksSummary) {
+      return null;
+    }
+
+    const parts: string[] = [];
+    if (tasksSummary.open > 0) parts.push(`Offen ${tasksSummary.open}`);
+    if (tasksSummary.inProgress > 0) parts.push(`In Bearbeitung ${tasksSummary.inProgress}`);
+    if (tasksSummary.waiting > 0) parts.push(`Wartend ${tasksSummary.waiting}`);
+
+    return parts.join(' • ');
+  }, [tasksSummary]);
+
   useEffect(() => {
     if (!location.includes('?')) {
       return;
@@ -553,7 +709,7 @@ export default function Dashboard() {
               );
             })}
           </div>
-          <div className="grid gap-6 lg:grid-cols-[2fr,1fr]">
+          <div className="grid gap-6 lg:grid-cols-[2fr,1fr,1fr]">
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
                 <div>
@@ -568,6 +724,26 @@ export default function Dashboard() {
               </CardHeader>
               <CardContent className="p-0">
                 {sectionContent}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between">
+                <div>
+                  <CardTitle className="text-lg">Aufgaben</CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    Überblick deiner zugewiesenen Aufgaben
+                  </p>
+                  {tasksSummaryLabel && (
+                    <p className="text-xs text-muted-foreground">{tasksSummaryLabel}</p>
+                  )}
+                </div>
+                <Link href="/tasks" className="text-sm text-primary hover:underline">
+                  Aufgaben öffnen
+                </Link>
+              </CardHeader>
+              <CardContent>
+                {tasksContent}
               </CardContent>
             </Card>
 

@@ -216,6 +216,7 @@ model CrmUser {
   salesRepEmail      String?
   salesRepId         String?
   role               String   @default("sales_rep")
+  profileImageUrl    String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 

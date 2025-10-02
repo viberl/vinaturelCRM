@@ -141,6 +141,62 @@ async function main() {
       salesRepEmail: 'hklotz@vinaturel.de',
       salesRepId: '018e0a340c1b714baff99e742acef701',
       role: 'sales_rep'
+    },
+    {
+      email: 'johm@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Jan',
+      lastName: 'Ohm',
+      role: 'innendienst'
+    },
+    {
+      email: 'hmakowski@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Hubert',
+      lastName: 'Makowski',
+      role: 'innendienst'
+    },
+    {
+      email: 'lendell@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Leon',
+      lastName: 'Endell',
+      role: 'innendienst'
+    },
+    {
+      email: 'srokowska@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Sabina',
+      lastName: 'Rokowska',
+      role: 'innendienst'
+    },
+    {
+      email: 'bhomilius@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Babett',
+      lastName: 'Homilius',
+      role: 'innendienst'
+    },
+    {
+      email: 'vfranke@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Veronika',
+      lastName: 'Franke',
+      role: 'innendienst'
+    },
+    {
+      email: 'clischka@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Christian',
+      lastName: 'Lischka',
+      role: 'innendienst'
+    },
+    {
+      email: 'gfranke@vinaturel.de',
+      password: 'Vinaturel123',
+      firstName: 'Grace',
+      lastName: 'Franke',
+      role: 'innendienst'
     }
   ];
 

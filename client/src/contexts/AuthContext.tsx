@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import api from '@/lib/api';
 
@@ -13,12 +13,14 @@ interface User {
   salesRepEmail?: string | null;
   salesRepId?: string | null;
   contextToken?: string;
+  profileImageUrl?: string | null;
 }
 
 interface AuthContextType {
   user: User | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  refreshUser: () => Promise<void>;
   loading: boolean;
   error: string | null;
 }
@@ -46,7 +48,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       role: userData.role ?? 'user',
       salesRepEmail: userData.salesRepEmail ?? null,
       salesRepId: userData.salesRepId ?? null,
-      contextToken: userData.contextToken
+      contextToken: userData.contextToken,
+      profileImageUrl: userData.profileImageUrl ?? null
     };
   };
 
@@ -57,7 +60,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     queryClient.clear();
   };
 
-  const checkAuth = async () => {
+  const checkAuth = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     const jwtToken = typeof window !== 'undefined' ? localStorage.getItem('jwtToken') : null;
     if (!jwtToken) {
       setUser(null);
@@ -79,11 +84,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [queryClient]);
 
   useEffect(() => {
     checkAuth();
-  }, []);
+  }, [checkAuth]);
 
   const login = async (email: string, password: string) => {
     setLoading(true);
@@ -135,7 +140,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading, error }}>
+    <AuthContext.Provider value={{ user, login, logout, refreshUser: checkAuth, loading, error }}>
       {children}
     </AuthContext.Provider>
   );

@@ -13,6 +13,7 @@ import {
   Briefcase,
   Building2,
   MessageCircle,
+  UserCog,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -21,8 +22,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger
+  DropdownMenuTrigger,
+  DropdownMenuSeparator
 } from "@/components/ui/dropdown-menu";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 type NavigationItem = {
   name: string;
@@ -66,6 +69,7 @@ export default function Sidebar({
     .join('')
     .toUpperCase()
     .slice(0, 2);
+  const profileImage = user?.profileImageUrl ?? null;
 
   const handleLogout = async () => {
     try {
@@ -89,6 +93,18 @@ export default function Sidebar({
     }
 
     return items;
+  }, [user?.role]);
+
+  const roleLabel = useMemo(() => {
+    const normalized = user?.role?.toLowerCase();
+    switch (normalized) {
+      case 'innendienst':
+        return 'Innendienst';
+      case 'management':
+        return 'Management';
+      default:
+        return 'Sales Manager';
+    }
   }, [user?.role]);
 
   const handleItemClick = () => {
@@ -183,14 +199,18 @@ export default function Sidebar({
       {/* User Profile */}
       <div className="p-4 border-t border-border">
         <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-secondary/20 text-secondary rounded-full flex items-center justify-center">
-            <span className="text-xs font-semibold">{initials || 'NN'}</span>
-          </div>
+          <Avatar className="h-9 w-9">
+            {profileImage ? (
+              <AvatarImage src={profileImage} alt={displayName} />
+            ) : (
+              <AvatarFallback>{initials || 'NN'}</AvatarFallback>
+            )}
+          </Avatar>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-foreground">
               {displayName}
             </p>
-            <p className="text-xs text-muted-foreground">Sales Manager</p>
+            <p className="text-xs text-muted-foreground">{roleLabel}</p>
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -199,6 +219,17 @@ export default function Sidebar({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem
+                onSelect={(event) => {
+                  event.preventDefault();
+                  setLocation('/account');
+                  onClose();
+                }}
+              >
+                <UserCog className="mr-2 h-4 w-4" />
+                Mein Konto
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem
                 onSelect={(event) => {
                   event.preventDefault();
