@@ -37,6 +37,8 @@ import api from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { sampleCustomersForComparison } from "@/data/sampleCustomers";
 import type { CatalogDetailResponse, CatalogDetailItem } from "@shared/types/catalog";
+import type { FocusWineListResponse } from "@shared/types/focus-list";
+import { normalizeArticleNumber } from "@shared/utils/article";
 import {
   Carousel,
   CarouselContent,
@@ -102,6 +104,15 @@ export default function SortimentDetailPage() {
 
   const item: CatalogDetailItem | null = detailQuery.data?.item ?? null;
 
+  const focusListQuery = useQuery<FocusWineListResponse>({
+    queryKey: ["focus-wines"],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<FocusWineListResponse>("/admin-api/focus-wines", { signal });
+      return response.data;
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+
   const [isFavorite, setIsFavorite] = useState(false);
   const [wishlistItem, setWishlistItem] = useState<CatalogDetailItem | null>(null);
   const [wishlistCustomer, setWishlistCustomer] = useState<string>(sampleCustomersForComparison[0]?.id ?? "");
@@ -143,6 +154,18 @@ export default function SortimentDetailPage() {
     }
     return item.image ? [item.image] : [];
   }, [item]);
+
+  const isFocusWine = useMemo(() => {
+    const normalizedArticle = normalizeArticleNumber(item?.articleNumber);
+    if (!normalizedArticle) {
+      return false;
+    }
+    const entries = focusListQuery.data?.articleNumbers ?? [];
+    if (entries.length === 0) {
+      return false;
+    }
+    return entries.some((entry) => normalizeArticleNumber(entry) === normalizedArticle);
+  }, [focusListQuery.data?.articleNumbers, item?.articleNumber]);
 
   const monthlySales = item?.monthlySales ?? [];
   const coverageDescription = describeCoverage(item?.monthsOfStock ?? null);
@@ -277,9 +300,16 @@ export default function SortimentDetailPage() {
               <div className="flex-1 space-y-4">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h1 className="text-2xl font-semibold text-foreground">
-                      {item.wineName ?? "Unbenannter Artikel"} {item.vintage && `(${item.vintage})`}
-                    </h1>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <h1 className="text-2xl font-semibold leading-tight text-foreground">
+                        {item.wineName ?? "Unbenannter Artikel"} {item.vintage && `(${item.vintage})`}
+                      </h1>
+                      {isFocusWine && (
+                        <Badge variant="outline" className="border-accent text-accent-600">
+                          Fokuswein
+                        </Badge>
+                      )}
+                    </div>
                     <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                       <span>{item.winery ?? "Unbekanntes Weingut"}</span>
                       <span>•</span>

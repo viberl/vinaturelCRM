@@ -3,7 +3,7 @@ import { isAxiosError } from "axios";
 import { Link } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import TopBar from "@/components/TopBar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -502,7 +502,7 @@ export default function SortimentPage() {
                 Sortiment wird geladen...
               </Card>
             ) : (
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+              <div className="space-y-4">
                 {sortedItems.map((item) => {
                   const isFavorite = favorites.has(item.id);
                   const articleNumberNormalized = normalizeArticleNumber(item.articleNumber);
@@ -525,88 +525,98 @@ export default function SortimentPage() {
                       >
                         {isFavorite ? <Star className="h-4 w-4 text-primary" /> : <StarOff className="h-4 w-4" />}
                       </button>
-                      <CardHeader className="pr-14">
-                        <CardTitle className="text-lg text-foreground">
-                          {item.wineName ?? "Unbenannter Artikel"}
-                          {item.vintage ? ` (${item.vintage})` : ""}
-                        </CardTitle>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                          <span>{item.winery ?? "Unbekanntes Weingut"}</span>
-                          <span>•</span>
-                          <span>{item.volume ?? "–"}</span>
-                          <span>•</span>
-                          <span>{item.articleNumber ?? "–"}</span>
-                        </div>
-                        {isFocus && (
-                          <Badge variant="outline" className="mt-3 w-fit border-accent text-accent-600">
-                            Fokuswein
-                          </Badge>
-                        )}
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        <div className="flex flex-wrap items-center gap-2">
-                          {item.country && <Badge variant="secondary">{item.country}</Badge>}
-                          {item.region && <Badge variant="secondary">{item.region}</Badge>}
-                          {item.certifications.map((cert) => (
-                            <Badge key={cert} variant="outline">
-                              {cert}
-                            </Badge>
-                          ))}
-                        </div>
-                        <div className="grid grid-cols-2 gap-4 text-sm">
-                          <div className="space-y-1">
-                            <span className="text-muted-foreground">Verfügbar</span>
-                            <p className="text-lg font-semibold text-foreground">
-                              {item.stock != null ? `${item.stock.toLocaleString("de-DE")} Fl.` : "–"}
-                            </p>
+                      <div className="flex flex-col gap-4 p-4 sm:p-5">
+                        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-6 md:pr-10">
+                          <div className="min-w-0 space-y-3 pr-10 sm:pr-12 md:pr-0">
+                            <div className="space-y-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="text-base font-semibold leading-tight text-foreground md:text-lg">
+                                  {item.wineName ?? "Unbenannter Artikel"}
+                                  {item.vintage ? ` (${item.vintage})` : ""}
+                                </p>
+                                {isFocus && (
+                                  <Badge variant="outline" className="border-accent text-accent-600">
+                                    Fokuswein
+                                  </Badge>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+                                <span className="truncate">{item.winery ?? "Unbekanntes Weingut"}</span>
+                                <span>•</span>
+                                <span>{item.volume ?? "–"}</span>
+                                <span>•</span>
+                                <span>{item.articleNumber ?? "–"}</span>
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {item.country && <Badge variant="secondary">{item.country}</Badge>}
+                              {item.region && <Badge variant="secondary">{item.region}</Badge>}
+                              {item.certifications.map((cert) => (
+                                <Badge key={cert} variant="outline">
+                                  {cert}
+                                </Badge>
+                              ))}
+                            </div>
+                            {item.grapes.length > 0 && (
+                              <p className="text-xs text-muted-foreground">
+                                Rebsorten: {item.grapes.join(", ")}
+                              </p>
+                            )}
                           </div>
-                          <div className="space-y-1">
-                            <span className="text-muted-foreground">Preis VK1</span>
-                            <p className="text-lg font-semibold text-foreground">
-                              {formatCurrency(item.prices[0]?.value ?? null)}
-                            </p>
+                          <div className="flex w-full flex-col items-start gap-3 text-sm text-muted-foreground md:w-auto md:items-end md:text-right md:mr-12">
+                            <div className="flex w-full flex-wrap items-center gap-x-6 gap-y-2 md:w-auto md:justify-end">
+                              <div className="space-y-1">
+                                <span>Verfügbar</span>
+                                <p className="text-lg font-semibold text-foreground">
+                                  {item.stock != null ? `${item.stock.toLocaleString("de-DE")} Fl.` : "–"}
+                                </p>
+                              </div>
+                              <div className="space-y-1">
+                                <span>Preis VK1</span>
+                                <p className="text-lg font-semibold text-foreground">
+                                  {formatCurrency(item.prices[0]?.value ?? null)}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap md:w-auto md:justify-end">
+                              <Button asChild variant="secondary" size="sm" className="w-full gap-2 sm:w-auto">
+                                <Link href={`/sortiment/${item.id}`}>
+                                  <PackageSearch className="h-4 w-4" />
+                                  Details
+                                </Link>
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="w-full gap-2 sm:w-auto"
+                                onClick={() => handleOpenPrice(item)}
+                              >
+                                <Percent className="h-4 w-4" />
+                                Preisvergleich
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="w-full gap-2 sm:w-auto"
+                                onClick={() => handleOpenWishlist(item)}
+                              >
+                                <ListPlus className="h-4 w-4" />
+                                Merkliste
+                              </Button>
+                              <Button
+                                variant="default"
+                                size="sm"
+                                className="w-full gap-2 sm:w-auto"
+                                onClick={() => handleQuickOrder(item)}
+                              >
+                                <ShoppingCart className="h-4 w-4" />
+                                Bestellen
+                              </Button>
+                            </div>
                           </div>
                         </div>
-                        {item.grapes.length > 0 && (
-                          <div className="rounded-md border border-border/70 bg-muted/40 p-3 text-sm text-muted-foreground">
-                            <span className="font-medium text-foreground">Rebsorten:</span> {item.grapes.join(", ")}
-                          </div>
-                        )}
-                        <div className="flex flex-wrap gap-2">
-                          <Button asChild variant="secondary" size="sm" className="gap-2">
-                            <Link href={`/sortiment/${item.id}`}>
-                              <PackageSearch className="h-4 w-4" />
-                              Details
-                            </Link>
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="gap-2"
-                            onClick={() => handleOpenPrice(item)}
-                          >
-                            <Percent className="h-4 w-4" />
-                            Preisvergleich
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="gap-2"
-                            onClick={() => handleOpenWishlist(item)}
-                          >
-                            <ListPlus className="h-4 w-4" />
-                            Merkliste
-                          </Button>
-                          <Button
-                            variant="default"
-                            size="sm"
-                            className="gap-2"
-                            onClick={() => handleQuickOrder(item)}
-                          >
-                            <ShoppingCart className="h-4 w-4" />
-                            Bestellen
-                          </Button>
-                        </div>
+
                         {item.allocation && (
                           <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
                             <div className="flex items-center gap-2 font-medium">
@@ -618,12 +628,12 @@ export default function SortimentPage() {
                             )}
                           </div>
                         )}
-                      </CardContent>
+                      </div>
                     </Card>
                   );
                 })}
                 {sortedItems.length === 0 && !catalogQuery.isFetching && (
-                  <Card className="col-span-full border-dashed bg-muted/40 p-8 text-center text-muted-foreground">
+                  <Card className="border-dashed bg-muted/40 p-8 text-center text-muted-foreground">
                     Keine Artikel im aktuellen Filter gefunden.
                   </Card>
                 )}
