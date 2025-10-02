@@ -14,6 +14,7 @@ import {
   Building2,
   MessageCircle,
   UserCog,
+  Megaphone,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -39,6 +40,7 @@ const baseNavigation: NavigationItem[] = [
   { name: "Kunden-Karte", href: "/map", icon: Map },
   { name: "Kundenliste", href: "/customers", icon: Users },
   { name: "Sortiment", href: "/sortiment", icon: Wine },
+  { name: "Marketing", href: "/marketing", icon: Megaphone },
   { name: "Auswertungen", href: "/auswertungen", icon: BarChart3 },
   { name: "Aufgaben", href: "/tasks", icon: CheckSquare },
   { name: "Mitarbeiter-Portal", href: "/mitarbeiter-portal", icon: Briefcase },

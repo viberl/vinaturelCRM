@@ -58,6 +58,7 @@ import type {
   AnalyticsTrendPoint,
 } from "@shared/types/analytics";
 import type { LintherListeResponse, LintherListeRow } from "@shared/types/linther-liste";
+import type { SalesRepProfile } from "@shared/types/sales-rep";
 import { getLintherListe, addLintherListeRow, GraphApiError } from "./services/lintherListeService";
 import type {
   CatalogListResponse,
@@ -393,6 +394,19 @@ function normaliseCoordinateValue(value: number | null | undefined): string | nu
   return Number.isFinite(parsed) ? parsed.toString() : null;
 }
 
+const fallbackNameFromEmail = (email?: string | null) => {
+  if (!email) return null;
+  const localPart = email.split('@')[0];
+  if (!/[a-zA-Z]/.test(localPart)) return null;
+  const sanitized = localPart.replace(/^rep[-_]?/, '');
+  if (!/[a-zA-Z]/.test(sanitized)) return null;
+  return sanitized
+    .split(/[\s_.-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(' ');
+};
+
 function isCustomerAssignedToUser(
   customer: CustomerWithRelations,
   crmUser: { salesRepId?: string | null; salesRepEmail?: string | null; role?: string | null }
@@ -447,6 +461,10 @@ function mapCustomerToResponse(
     email: customer.email,
     phone: customer.phone ?? null,
     address,
+    street: customer.street ?? null,
+    zip: customer.zip ?? null,
+    city: customer.city ?? null,
+    country: customer.country ?? null,
     lat: normaliseCoordinateValue(customer.latitude),
     lng: normaliseCoordinateValue(customer.longitude),
     status: 'active',
@@ -3108,19 +3126,20 @@ async function aggregateOrdersForAnalytics(
 async function syncCustomersFromShopware(
   crmUser: { id: string; salesRepEmail?: string | null; salesRepId?: string | null },
   normalizedEmail?: string | null,
-  specificCustomerIds?: string[]
+  specificCustomerIds?: string[],
+  fetchAll = false
 ) {
-  if (!normalizedEmail && !crmUser.salesRepId && (!specificCustomerIds || specificCustomerIds.length === 0)) {
+  if (!fetchAll && !normalizedEmail && !crmUser.salesRepId && (!specificCustomerIds || specificCustomerIds.length === 0)) {
     return [] as CustomerWithRelations[];
   }
 
   const queries: Array<Record<string, unknown>> = [];
 
-  if (crmUser.salesRepId) {
+  if (!fetchAll && crmUser.salesRepId) {
     queries.push({ type: 'equals', field: SHOPWARE_ASSIGNMENT_FIELD, value: crmUser.salesRepId });
   }
 
-  if (normalizedEmail) {
+  if (!fetchAll && normalizedEmail) {
     queries.push({ type: 'equals', field: 'customFields.vinaturel_sales_representative_email', value: normalizedEmail });
     queries.push({ type: 'equals', field: 'customFields.sales_representative_email', value: normalizedEmail });
   }
@@ -3133,19 +3152,11 @@ async function syncCustomersFromShopware(
     });
   }
 
-  if (queries.length === 0) {
+  if (!fetchAll && queries.length === 0) {
     return [] as CustomerWithRelations[];
   }
 
-  const payload = {
-    filter: [
-      {
-        type: 'multi',
-        operator: 'or',
-        queries
-      }
-    ],
-    limit: 500,
+  const basePayload: Record<string, unknown> = {
     includes: {
       customer: [
         'id',
@@ -3201,14 +3212,53 @@ async function syncCustomersFromShopware(
     ]
   };
 
+  if (!fetchAll || queries.length > 0) {
+    basePayload.filter = [
+      {
+        type: 'multi',
+        operator: 'or',
+        queries
+      }
+    ];
+  }
+
   let shopwareCustomers: Array<Record<string, any>> = [];
   try {
-    const response = await adminSearch<any>('/search/customer', payload);
-    shopwareCustomers = response?.data ?? [];
+    const aggregated: Array<Record<string, any>> = [];
+    const limitPerPage = 500;
+    let page = 1;
+
+    while (true) {
+      const payload = {
+        ...basePayload,
+        limit: limitPerPage,
+        page,
+      };
+
+      const response = await adminSearch<any>('/search/customer', payload);
+      const pageData = response?.data ?? [];
+      aggregated.push(...pageData);
+
+      if (pageData.length < limitPerPage) {
+        break;
+      }
+      page += 1;
+
+      if (page > 50) {
+        console.warn('Aborting Shopware customer pagination after 50 pages', {
+          crmUserId: crmUser.id,
+          totalFetched: aggregated.length,
+        });
+        break;
+      }
+    }
+
+    shopwareCustomers = aggregated;
     console.log('Shopware customers fetched for sync', {
       count: shopwareCustomers.length,
-      groupIds: Array.from(new Set(shopwareCustomers.map((c) => c.groupId || c.group?.id).filter(Boolean))),
-      specificCustomerIds
+      pages: Math.ceil(shopwareCustomers.length / limitPerPage),
+      specificCustomerIds,
+      fetchAll
     });
   } catch (error) {
     console.error('Failed to fetch customers from Shopware Admin API for sync', {
@@ -3442,30 +3492,43 @@ interface LoadCustomersResult {
   hadAssignment: boolean;
   initialCount: number;
   requiresSync: boolean;
+  totalCount: number;
+}
+
+interface LoadCustomersOptions {
+  timestamp?: string;
+  skip?: number;
+  take?: number;
+  includeTotal?: boolean;
+  searchTerm?: string;
 }
 
 async function loadAssignedCustomers(
   crmUser: CrmUserContext,
   normalizedEmail: string | null,
-  options: { timestamp?: string } = {}
+  options: LoadCustomersOptions = {}
 ): Promise<LoadCustomersResult> {
-  if (hasAllCustomerAccess(crmUser.role)) {
-    const customers = await prisma.customer.findMany({
-      include: customerRelationInclude,
-      orderBy: {
-        updatedAt: 'desc',
-      },
-      take: 500,
-    });
+  const take = Math.min(Math.max(options.take ?? 100, 1), 500);
+  const skip = Math.max(options.skip ?? 0, 0);
+  const includeTotal = options.includeTotal ?? true;
+  const searchTerm = options.searchTerm?.trim() ?? '';
 
-    return {
-      customers: customers as CustomerWithRelations[],
-      synced: false,
-      hadAssignment: true,
-      initialCount: customers.length,
-      requiresSync: false,
-    } satisfies LoadCustomersResult;
+  const baseFilters: Prisma.CustomerWhereInput[] = [];
+
+  if (searchTerm) {
+    baseFilters.push({
+      OR: [
+        { firstName: { contains: searchTerm, mode: 'insensitive' } },
+        { lastName: { contains: searchTerm, mode: 'insensitive' } },
+        { company: { contains: searchTerm, mode: 'insensitive' } },
+        { email: { contains: searchTerm, mode: 'insensitive' } },
+        { customerNumber: { contains: searchTerm, mode: 'insensitive' } },
+        { customerGroup: { contains: searchTerm, mode: 'insensitive' } },
+      ],
+    });
   }
+
+  const hasAllAccess = hasAllCustomerAccess(crmUser.role);
 
   const orConditions: any[] = [];
 
@@ -3492,25 +3555,86 @@ async function loadAssignedCustomers(
   }
 
   if (orConditions.length === 0) {
+    if (hasAllAccess) {
+      const whereAll = baseFilters.length
+        ? {
+            AND: baseFilters,
+          }
+        : {};
+
+      const [totalCount, customers] = await Promise.all([
+        includeTotal
+          ? prisma.customer.count({ where: whereAll })
+          : Promise.resolve(0),
+        prisma.customer.findMany({
+          include: customerRelationInclude,
+          orderBy: {
+            updatedAt: 'desc',
+          },
+          skip,
+          take,
+          where: whereAll,
+        }),
+      ]);
+
+      return {
+        customers: customers as CustomerWithRelations[],
+        synced: false,
+        hadAssignment: true,
+        initialCount: customers.length,
+        requiresSync: false,
+        totalCount: includeTotal ? totalCount : customers.length,
+      } satisfies LoadCustomersResult;
+    }
+
     return {
       customers: [],
       synced: false,
       hadAssignment: false,
       initialCount: 0,
-      requiresSync: false
+      requiresSync: false,
+      totalCount: 0,
     } satisfies LoadCustomersResult;
   }
 
-  let customers = await prisma.customer.findMany({
-    where: {
-      OR: orConditions
-    },
-    include: customerRelationInclude,
-    orderBy: {
-      updatedAt: 'desc'
-    },
-    take: 500
-  });
+  const assignmentWhere: Prisma.CustomerWhereInput = hasAllAccess
+    ? {}
+    : {
+        OR: orConditions,
+      };
+
+  const combinedWhere: Prisma.CustomerWhereInput = (() => {
+    if (hasAllAccess) {
+      return baseFilters.length
+        ? {
+            AND: baseFilters,
+          }
+        : {};
+    }
+
+    return baseFilters.length
+      ? {
+          AND: [assignmentWhere, ...baseFilters],
+        }
+      : assignmentWhere;
+  })();
+
+  const [totalCountMaybe, customersInitial] = await Promise.all([
+    includeTotal
+      ? prisma.customer.count({ where: combinedWhere })
+      : Promise.resolve(0),
+    prisma.customer.findMany({
+      where: combinedWhere,
+      include: customerRelationInclude,
+      orderBy: {
+        updatedAt: 'desc',
+      },
+      skip,
+      take,
+    }),
+  ]);
+
+  let customers = customersInitial;
 
   const initialCount = customers.length;
 
@@ -3526,6 +3650,7 @@ async function loadAssignedCustomers(
     );
 
   let synced = false;
+  let totalCount = includeTotal ? totalCountMaybe : customers.length;
 
   if (requiresSync) {
     console.log('No customers found in CRM database, attempting to sync from Shopware', {
@@ -3540,7 +3665,9 @@ async function loadAssignedCustomers(
         salesRepEmail: crmUser.salesRepEmail,
         salesRepId: crmUser.salesRepId
       },
-      normalizedEmail ?? null
+      normalizedEmail ?? null,
+      undefined,
+      hasAllAccess
     );
 
     console.log('Sync from Shopware completed', {
@@ -3550,22 +3677,39 @@ async function loadAssignedCustomers(
     });
 
     synced = true;
+
+    if (includeTotal) {
+      totalCount = await prisma.customer.count({ where: combinedWhere });
+    }
+
+    customers = await prisma.customer.findMany({
+      where: combinedWhere,
+      include: customerRelationInclude,
+      orderBy: {
+        updatedAt: 'desc',
+      },
+      skip,
+      take,
+    });
   }
 
-  const allowedCustomers = (customers as CustomerWithRelations[]).filter((customer) =>
-    isCustomerAssignedToUser(customer, {
-      salesRepId: crmUser.salesRepId,
-      salesRepEmail: crmUser.salesRepEmail,
-      role: crmUser.role,
-    })
-  );
+  const allowedCustomers = hasAllAccess
+    ? (customers as CustomerWithRelations[])
+    : (customers as CustomerWithRelations[]).filter((customer) =>
+        isCustomerAssignedToUser(customer, {
+          salesRepId: crmUser.salesRepId,
+          salesRepEmail: crmUser.salesRepEmail,
+          role: crmUser.role,
+        })
+      );
 
   return {
     customers: allowedCustomers,
     synced,
     hadAssignment: true,
     initialCount,
-    requiresSync
+    requiresSync,
+    totalCount,
   } satisfies LoadCustomersResult;
 }
 
@@ -5423,7 +5567,14 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
 
       const normalizedEmail = crmUser.salesRepEmail?.toLowerCase() ?? null;
 
-      const { customers: allowedCustomers, hadAssignment } = await loadAssignedCustomers(
+      const rawLimit = Number.parseInt(String(req.query.limit ?? ''), 10);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 100;
+      const rawPage = Number.parseInt(String(req.query.page ?? ''), 10);
+      const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
+      const skip = (page - 1) * limit;
+      const searchTerm = typeof req.query.search === 'string' ? req.query.search : '';
+
+      const { customers: allowedCustomers, hadAssignment, synced, requiresSync, totalCount } = await loadAssignedCustomers(
         {
           id: crmUser.id,
           email: crmUser.email,
@@ -5432,12 +5583,29 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
           role: crmUser.role,
         },
         normalizedEmail,
-        { timestamp }
+        {
+          timestamp,
+          skip,
+          take: limit,
+          includeTotal: true,
+          searchTerm,
+        }
       );
 
       if (!hadAssignment) {
         console.warn('CRM user has no sales representative assignment', { userId: crmUser.id });
-        return res.json([]);
+        return res.json({
+          customers: [],
+          pagination: {
+            page,
+            limit,
+            total: 0,
+            totalPages: 1,
+          },
+          synced: false,
+          hadAssignment: false,
+          requiresSync: false,
+        });
       }
 
       const mappedCustomers: MapCustomer[] = allowedCustomers.map((customer) =>
@@ -5447,13 +5615,26 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         })
       );
 
+      const totalPages = Math.max(1, Math.ceil(totalCount / limit));
+
       console.log(`Fetched ${mappedCustomers.length} customers assigned to user`, {
         userId: crmUser.id,
         email: crmUser.email,
         timestamp
       });
 
-      return res.json(mappedCustomers);
+      return res.json({
+        customers: mappedCustomers,
+        pagination: {
+          page,
+          limit,
+          total: totalCount,
+          totalPages,
+        },
+        synced,
+        hadAssignment: true,
+        requiresSync,
+      });
 
     } catch (error: any) {
       console.error('Error fetching customers:', {
@@ -5470,6 +5651,69 @@ export async function registerRoutes(app: Express): Promise<{ httpServer: Return
         code: 'CUSTOMER_FETCH_ERROR',
         errorId,
         timestamp
+      });
+    }
+  });
+
+  app.get('/admin-api/sales-reps', auth, async (_req: AuthRequest, res) => {
+    try {
+      const [reps, crmUsers] = await Promise.all([
+        prisma.salesRep.findMany({
+          orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        }),
+        prisma.crmUser.findMany({
+          where: { salesRepId: { not: null } },
+          select: {
+            salesRepId: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        }),
+      ]);
+
+      const crmByRepId = new Map<string, typeof crmUsers[number]>();
+      crmUsers.forEach((user) => {
+        if (user.salesRepId) {
+          crmByRepId.set(user.salesRepId, user);
+        }
+      });
+
+      const payload: SalesRepProfile[] = reps.map((rep) => {
+        const crmMatch = crmByRepId.get(rep.id) ?? null;
+        const firstName = rep.firstName ?? crmMatch?.firstName ?? null;
+        const lastName = rep.lastName ?? crmMatch?.lastName ?? null;
+        const email = rep.email ?? crmMatch?.email ?? '';
+        let displayName = [firstName, lastName]
+          .filter((value): value is string => Boolean(value && value.trim()))
+          .map((value) => value.trim())
+          .join(' ');
+
+        if (!displayName) {
+          displayName = fallbackNameFromEmail(crmMatch?.email ?? rep.email) ?? email;
+        }
+
+        return {
+          id: rep.id,
+          email,
+          firstName: firstName ?? null,
+          lastName: lastName ?? null,
+          displayName,
+        } satisfies SalesRepProfile;
+      });
+
+      return res.json(payload);
+    } catch (error) {
+      console.error('Failed to fetch sales reps', { error });
+      return res.status(500).json({
+        success: false,
+        message: 'Sales Reps konnten nicht geladen werden.',
       });
     }
   });

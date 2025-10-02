@@ -6,6 +6,10 @@ export interface MapCustomer {
   email: string;
   phone?: string | null;
   address?: string | null;
+  street?: string | null;
+  zip?: string | null;
+  city?: string | null;
+  country?: string | null;
   lat: string | null;
   lng: string | null;
   status: CustomerStatus;

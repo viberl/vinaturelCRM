@@ -14,7 +14,7 @@ import CustomerPanel from "@/components/CustomerPanel";
 import type { MapCustomer } from "@shared/types/map-customer";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import api from "@/lib/api";
+import { fetchAllCustomers } from "@/lib/customerApi";
 
 // Fix for default markers in react-leaflet
 delete (Icon.Default.prototype as any)._getIconUrl;
@@ -53,11 +53,8 @@ export default function MapView() {
   });
 
   const { data: customers = [], isLoading } = useQuery<MapCustomer[]>({
-    queryKey: ["/admin-api/search/customer"],
-    queryFn: async () => {
-      const response = await api.get("/admin-api/search/customer");
-      return response.data;
-    },
+    queryKey: ["/admin-api/search/customer", "map"],
+    queryFn: async () => fetchAllCustomers(500),
     retry: 1,
   });
 

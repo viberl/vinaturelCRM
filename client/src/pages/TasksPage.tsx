@@ -22,6 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import api from "@/lib/api";
+import { fetchAllCustomers } from "@/lib/customerApi";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
 import type { Task, TaskStatus, TaskPriority, TaskCategory, TaskListResponse, CreateTaskRequest } from "@shared/types/task";
@@ -182,11 +183,8 @@ export default function TasksPage() {
   });
 
   const { data: customersData } = useQuery<MapCustomer[]>({
-    queryKey: ["/admin-api/search/customer"],
-    queryFn: async () => {
-      const response = await api.get("/admin-api/search/customer");
-      return response.data as MapCustomer[];
-    },
+    queryKey: ["/admin-api/search/customer", "tasks"],
+    queryFn: async () => fetchAllCustomers(500),
     enabled: Boolean(user),
   });
 
